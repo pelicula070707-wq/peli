@@ -1,10 +1,7 @@
 require('dotenv').config();
 
-const express    = require('express');
-const nodemailer = require('nodemailer');
-const cors       = require('cors');
-const fs         = require('fs');
-const path       = require('path');
+const express = require('express');
+const cors    = require('cors');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -13,44 +10,205 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-/* ─────────────────────────────────────────────
-   BASE DE DATOS SIMPLE (archivo JSON)
-   En Render usa /tmp para escritura
-───────────────────────────────────────────── */
-const DB_PATH = process.env.RENDER ? '/tmp/reservas.json' : path.join(__dirname, 'reservas.json');
+/* ═══════════════════════════════════════════════════════
+   CONFIGURACIÓN DE HORARIOS
+   Edita estos arrays para cambiar días y horas disponibles
+═══════════════════════════════════════════════════════ */
+const HORAS_DISPONIBLES = ['10:00','11:00','12:00','13:00','16:00','17:00','18:00'];
+const DIAS_ADELANTE     = 14;   // cuántos días mostrar desde hoy
+const DIAS_BLOQUEADOS   = [0];  // 0=domingo, 6=sábado ([] = ninguno bloqueado)
 
-function loadDB() {
-  try {
-    if (fs.existsSync(DB_PATH)) return JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
-  } catch(e) { console.error('Error leyendo DB:', e.message); }
-  return { reservas: [] };
+/* ═══════════════════════════════════════════════════════
+   RESERVAS EN MEMORIA
+   key: "YYYY-MM-DD|HH:MM"  →  datos del cliente
+═══════════════════════════════════════════════════════ */
+const reservas = new Map();
+
+/* ═══════════════════════════════════════════════════════
+   SERVICIOS
+═══════════════════════════════════════════════════════ */
+const SERVICIOS = {
+  corte:       'Corte de Cabello — $15.000',
+  corte_barba: 'Corte + Barba — $22.000',
+  barba:       'Arreglo de Barba — $12.000',
+  afeitado:    'Afeitado Clásico — $18.000',
+  coloracion:  'Coloración — $35.000',
+  tratamiento: 'Tratamiento Capilar — $20.000',
+  combo:       'Combo Completo — $45.000',
+};
+
+/* ═══════════════════════════════════════════════════════
+   HELPERS DE FECHA
+═══════════════════════════════════════════════════════ */
+function getFechasDisponibles() {
+  const fechas = [];
+  const hoy    = new Date();
+  hoy.setHours(0, 0, 0, 0);
+
+  for (let i = 1; i <= DIAS_ADELANTE; i++) {
+    const d = new Date(hoy);
+    d.setDate(hoy.getDate() + i);
+    if (!DIAS_BLOQUEADOS.includes(d.getDay())) {
+      fechas.push(d.toISOString().split('T')[0]); // YYYY-MM-DD
+    }
+  }
+  return fechas;
 }
 
-function saveDB(data) {
-  try { fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2)); }
-  catch(e) { console.error('Error guardando DB:', e.message); }
+function getHorasLibres(fechaISO) {
+  return HORAS_DISPONIBLES.filter(h => !reservas.has(`${fechaISO}|${h}`));
 }
 
-function isSlotTaken(fecha, hora) {
-  const db = loadDB();
-  return db.reservas.some(r => r.fecha === fecha && r.hora === hora);
+function formatFecha(iso) {
+  const [y, m, d] = iso.split('-');
+  const meses = ['enero','febrero','marzo','abril','mayo','junio',
+                 'julio','agosto','septiembre','octubre','noviembre','diciembre'];
+  return `${+d} de ${meses[+m - 1]} de ${y}`;
 }
 
-function saveReserva(reserva) {
-  const db = loadDB();
-  db.reservas.push({ ...reserva, id: Date.now(), creadoEn: new Date().toISOString() });
-  saveDB(db);
+function formatDiaSemana(iso) {
+  const dias = ['Domingo','Lunes','Martes','Miércoles','Jueves','Viernes','Sábado'];
+  const d = new Date(iso + 'T12:00:00');
+  return dias[d.getDay()];
 }
 
-function getOcupadosPorFecha(fecha) {
-  const db = loadDB();
-  return db.reservas.filter(r => r.fecha === fecha).map(r => r.hora);
+/* ═══════════════════════════════════════════════════════
+   CORREO HTML — cliente
+═══════════════════════════════════════════════════════ */
+function htmlCliente({ nombre, telefono, servicio, fecha, hora, comentarios }) {
+  const svc     = SERVICIOS[servicio] || servicio;
+  const fechaFmt = formatFecha(fecha);
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1"></head>
+  <body style="margin:0;padding:0;background:#07070c;font-family:Georgia,serif">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#07070c;padding:36px 0">
+  <tr><td align="center">
+  <table width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%">
+    <tr><td style="background:#101018;border-top:3px solid #c9a84c;padding:36px 28px;text-align:center">
+      <p style="margin:0;color:#c9a84c;letter-spacing:7px;font-size:10px;text-transform:uppercase;font-family:Arial,sans-serif">Est. 2018</p>
+      <h1 style="margin:9px 0 4px;color:#f5f0e8;font-size:32px;letter-spacing:4px">BARBER &amp; CO.</h1>
+      <p style="margin:0;color:#777;letter-spacing:3px;font-size:9px;text-transform:uppercase;font-family:Arial,sans-serif">The Art of Grooming</p>
+    </td></tr>
+    <tr><td style="background:#141420;padding:36px 32px">
+      <p style="margin:0 0 6px;color:#c9a84c;font-size:10px;letter-spacing:5px;text-transform:uppercase;font-family:Arial,sans-serif">Reserva Confirmada ✅</p>
+      <p style="margin:0 0 14px;color:#d4c9b0;font-size:16px;line-height:1.8">Estimado/a <strong style="color:#f5f0e8">${nombre}</strong>,</p>
+      <p style="margin:0 0 28px;color:#888;font-size:13px;line-height:1.85">Tu reserva ha sido confirmada exitosamente. Te esperamos con todo nuestro equipo.</p>
+      <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #252530;border-top:2px solid #c9a84c">
+        <tr><td style="padding:18px 22px;border-bottom:1px solid #252530">
+          <p style="margin:0;color:#555;font-size:9px;letter-spacing:3px;text-transform:uppercase;font-family:Arial,sans-serif">Servicio</p>
+          <p style="margin:5px 0 0;color:#f5f0e8;font-size:15px">${svc}</p>
+        </td></tr>
+        <tr><td style="padding:18px 22px;border-bottom:1px solid #252530">
+          <table width="100%"><tr>
+            <td width="50%">
+              <p style="margin:0;color:#555;font-size:9px;letter-spacing:3px;text-transform:uppercase;font-family:Arial,sans-serif">Fecha</p>
+              <p style="margin:5px 0 0;color:#f5f0e8;font-size:15px">${fechaFmt}</p>
+            </td>
+            <td width="50%">
+              <p style="margin:0;color:#555;font-size:9px;letter-spacing:3px;text-transform:uppercase;font-family:Arial,sans-serif">Hora</p>
+              <p style="margin:5px 0 0;color:#f5f0e8;font-size:15px">${hora}</p>
+            </td>
+          </tr></table>
+        </td></tr>
+        <tr><td style="padding:18px 22px${comentarios ? ';border-bottom:1px solid #252530' : ''}">
+          <p style="margin:0;color:#555;font-size:9px;letter-spacing:3px;text-transform:uppercase;font-family:Arial,sans-serif">Teléfono</p>
+          <p style="margin:5px 0 0;color:#f5f0e8;font-size:15px">${telefono}</p>
+        </td></tr>
+        ${comentarios ? `<tr><td style="padding:18px 22px">
+          <p style="margin:0;color:#555;font-size:9px;letter-spacing:3px;text-transform:uppercase;font-family:Arial,sans-serif">Comentarios</p>
+          <p style="margin:5px 0 0;color:#c2b89a;font-size:13px;line-height:1.7">${comentarios}</p>
+        </td></tr>` : ''}
+      </table>
+      <p style="margin:26px 0 0;color:#555;font-size:11px;text-align:center;line-height:1.7">
+        ¿Necesitas cancelar? Contáctanos con al menos <strong style="color:#c9a84c">24 horas de anticipación</strong>.<br>
+        📞 +56 9 1234 5678
+      </p>
+    </td></tr>
+    <tr><td style="background:#07070c;padding:22px;text-align:center">
+      <p style="margin:0;color:#333;font-size:10px;letter-spacing:2px;text-transform:uppercase;font-family:Arial,sans-serif">Barber &amp; Co. · Santiago, Chile</p>
+    </td></tr>
+  </table>
+  </td></tr>
+  </table></body></html>`;
 }
 
-/* ─────────────────────────────────────────────
-   HTML
-───────────────────────────────────────────── */
-const PAGE = `<!DOCTYPE html>
+/* ═══════════════════════════════════════════════════════
+   CORREO HTML — admin
+═══════════════════════════════════════════════════════ */
+function htmlAdmin({ nombre, email, telefono, servicio, fecha, hora, comentarios }) {
+  const svc      = SERVICIOS[servicio] || servicio;
+  const fechaFmt = formatFecha(fecha);
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
+  <body style="margin:0;padding:24px;background:#f0f0f0;font-family:Arial,sans-serif">
+  <div style="max-width:520px;margin:0 auto;background:#fff;border-top:4px solid #c9a84c;padding:28px 32px">
+    <h2 style="margin:0 0 20px;color:#c9a84c;font-size:16px;letter-spacing:2px;text-transform:uppercase">🔔 Nueva Reserva</h2>
+    <table cellpadding="0" cellspacing="0" width="100%">
+      <tr><td style="padding:9px 0;border-bottom:1px solid #eee;color:#888;font-size:11px;width:120px">Cliente</td><td style="padding:9px 0;border-bottom:1px solid #eee;color:#222;font-size:13px"><strong>${nombre}</strong></td></tr>
+      <tr><td style="padding:9px 0;border-bottom:1px solid #eee;color:#888;font-size:11px">Email</td><td style="padding:9px 0;border-bottom:1px solid #eee;color:#222;font-size:13px">${email}</td></tr>
+      <tr><td style="padding:9px 0;border-bottom:1px solid #eee;color:#888;font-size:11px">Teléfono</td><td style="padding:9px 0;border-bottom:1px solid #eee;color:#222;font-size:13px">${telefono}</td></tr>
+      <tr><td style="padding:9px 0;border-bottom:1px solid #eee;color:#888;font-size:11px">Servicio</td><td style="padding:9px 0;border-bottom:1px solid #eee;color:#222;font-size:13px">${svc}</td></tr>
+      <tr><td style="padding:9px 0;border-bottom:1px solid #eee;color:#888;font-size:11px">Fecha</td><td style="padding:9px 0;border-bottom:1px solid #eee;color:#222;font-size:13px"><strong>${fechaFmt}</strong></td></tr>
+      <tr><td style="padding:9px 0;border-bottom:1px solid #eee;color:#888;font-size:11px">Hora</td><td style="padding:9px 0;border-bottom:1px solid #eee;color:#222;font-size:13px"><strong>${hora}</strong></td></tr>
+      <tr><td style="padding:9px 0;color:#888;font-size:11px">Comentarios</td><td style="padding:9px 0;color:#222;font-size:13px">${comentarios || '—'}</td></tr>
+    </table>
+  </div></body></html>`;
+}
+
+/* ═══════════════════════════════════════════════════════
+   ENVÍO CON RESEND
+═══════════════════════════════════════════════════════ */
+async function enviarCorreos({ nombre, email, telefono, servicio, fecha, hora, comentarios }) {
+  const key = process.env.RESEND_API_KEY;
+  if (!key) {
+    console.log('⚠️  RESEND_API_KEY no configurada — modo demo, correo simulado');
+    return;
+  }
+
+  const from   = process.env.FROM_EMAIL || 'Barber & Co. <onboarding@resend.dev>';
+  const admin  = process.env.ADMIN_EMAIL || email; // si no hay ADMIN_EMAIL, notifica al mismo cliente
+  const fechaFmt = formatFecha(fecha);
+
+  // Correo al cliente
+  const r1 = await fetch('https://api.resend.com/emails', {
+    method:  'POST',
+    headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      from,
+      to:      [email],
+      subject: `✅ Reserva confirmada — ${fechaFmt} a las ${hora} | Barber & Co.`,
+      html:    htmlCliente({ nombre, telefono, servicio, fecha, hora, comentarios }),
+    }),
+  });
+
+  if (!r1.ok) {
+    const err = await r1.json().catch(() => ({}));
+    throw new Error(`Resend cliente: ${r1.status} — ${JSON.stringify(err)}`);
+  }
+
+  // Notificación al admin
+  const r2 = await fetch('https://api.resend.com/emails', {
+    method:  'POST',
+    headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      from,
+      to:      [admin],
+      subject: `🔔 Nueva reserva: ${nombre} — ${fechaFmt} ${hora}`,
+      html:    htmlAdmin({ nombre, email, telefono, servicio, fecha, hora, comentarios }),
+    }),
+  });
+
+  if (!r2.ok) {
+    const err = await r2.json().catch(() => ({}));
+    throw new Error(`Resend admin: ${r2.status} — ${JSON.stringify(err)}`);
+  }
+
+  console.log(`📧 Correos enviados → cliente: ${email} | admin: ${admin}`);
+}
+
+/* ═══════════════════════════════════════════════════════
+   PÁGINA HTML COMPLETA
+═══════════════════════════════════════════════════════ */
+const PAGE = String.raw`<!DOCTYPE html>
 <html lang="es">
 <head>
 <meta charset="UTF-8">
@@ -68,17 +226,17 @@ html{scroll-behavior:smooth}
   --c:#f5f0e8;--c2:#d4c9b0;--m:#88889a;--f:#55556a;
   --br:rgba(201,168,76,.14);--bs:rgba(255,255,255,.04);
   --serif:'Cormorant Garamond',serif;--sans:'Josefin Sans',sans-serif;
-  --ease:cubic-bezier(.25,.46,.45,.94);
+  --ease:cubic-bezier(.25,.46,.45,.94)
 }
 body{background:var(--b0);color:var(--c);font-family:var(--sans);font-weight:300;line-height:1.7;overflow-x:hidden}
 ::-webkit-scrollbar{width:3px}::-webkit-scrollbar-thumb{background:var(--g3)}
+.tag{font-size:9px;letter-spacing:6px;text-transform:uppercase;color:var(--g);font-family:var(--sans);font-weight:200}
 .wrap{max-width:1180px;margin:0 auto;padding:0 36px}
-.tag{font-size:9px;letter-spacing:6px;text-transform:uppercase;color:var(--g);font-weight:200}
 .vline{width:1px;height:56px;background:linear-gradient(to bottom,transparent,var(--g),transparent);margin:0 auto}
 .hline{width:72px;height:1px;background:linear-gradient(to right,transparent,var(--g),transparent)}
 section{padding:110px 0}
 
-/* NAV */
+/* nav */
 nav{position:fixed;inset:0 0 auto;z-index:200;transition:background .4s,border .4s}
 nav.solid{background:rgba(5,5,10,.95);backdrop-filter:blur(18px);border-bottom:1px solid var(--br)}
 .nav-wrap{display:flex;align-items:center;justify-content:space-between;padding:22px 36px;max-width:1400px;margin:0 auto}
@@ -90,7 +248,7 @@ nav.solid{background:rgba(5,5,10,.95);backdrop-filter:blur(18px);border-bottom:1
 .nav-btn{padding:9px 22px;border:1px solid var(--g);color:var(--g)!important;transition:background .3s,color .3s!important}
 .nav-btn:hover{background:var(--g)!important;color:var(--b0)!important}
 
-/* HERO */
+/* hero */
 #hero{min-height:100vh;display:flex;align-items:center;position:relative;overflow:hidden}
 .hero-bg{position:absolute;inset:0;background:radial-gradient(ellipse 70% 55% at 62% 38%,rgba(201,168,76,.07) 0%,transparent 62%),linear-gradient(155deg,#0e0e18 0%,#05050a 55%,#09090f 100%)}
 .hero-grid{position:absolute;inset:0;background-image:linear-gradient(rgba(201,168,76,.035) 1px,transparent 1px),linear-gradient(90deg,rgba(201,168,76,.035) 1px,transparent 1px);background-size:76px 76px;-webkit-mask-image:radial-gradient(ellipse at center,transparent 15%,black 68%);mask-image:radial-gradient(ellipse at center,transparent 15%,black 68%)}
@@ -107,7 +265,7 @@ nav.solid{background:rgba(5,5,10,.95);backdrop-filter:blur(18px);border-bottom:1
 .btn-t::after{content:'→';transition:transform .3s}
 .btn-t:hover{color:var(--g)}.btn-t:hover::after{transform:translateX(5px)}
 
-/* STATS */
+/* stats */
 #stats{padding:0;background:var(--b2);border-top:1px solid var(--br);border-bottom:1px solid var(--br)}
 .stats-row{display:grid;grid-template-columns:repeat(4,1fr)}
 .stat{padding:46px 28px;text-align:center;border-right:1px solid var(--bs)}
@@ -115,7 +273,7 @@ nav.solid{background:rgba(5,5,10,.95);backdrop-filter:blur(18px);border-bottom:1
 .stat-n{font-family:var(--serif);font-size:50px;font-weight:300;color:var(--g);line-height:1;display:block}
 .stat-l{font-size:9px;letter-spacing:4px;text-transform:uppercase;color:var(--m);margin-top:7px;display:block}
 
-/* SERVICIOS */
+/* servicios */
 #servicios{background:var(--b1)}
 .sec-head{text-align:center;margin-bottom:72px}
 .sec-title{font-family:var(--serif);font-size:clamp(40px,4.8vw,68px);font-weight:300;color:var(--c);margin:14px 0;letter-spacing:-1px}
@@ -130,7 +288,7 @@ nav.solid{background:rgba(5,5,10,.95);backdrop-filter:blur(18px);border-bottom:1
 .srv-price{font-family:var(--serif);font-size:30px;color:var(--g);font-weight:300}
 .srv-price span{font-family:var(--sans);font-size:10px;font-weight:200;letter-spacing:2px;color:var(--m);margin-left:4px}
 
-/* EQUIPO */
+/* equipo */
 #equipo{background:var(--b0)}
 .team-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:38px}
 .member{text-align:center}
@@ -140,10 +298,10 @@ nav.solid{background:rgba(5,5,10,.95);backdrop-filter:blur(18px);border-bottom:1
 .m-role{font-size:9px;letter-spacing:4px;text-transform:uppercase;color:var(--g);margin-bottom:10px}
 .m-bio{font-size:12px;color:var(--m);line-height:1.85}
 
-/* RESERVAS */
+/* reservas */
 #reservas{background:var(--b1);position:relative;overflow:hidden}
 #reservas::before{content:'';position:absolute;top:-180px;right:-180px;width:520px;height:520px;border-radius:50%;background:radial-gradient(circle,rgba(201,168,76,.05) 0%,transparent 70%);pointer-events:none}
-.res-layout{display:grid;grid-template-columns:1fr 1.6fr;gap:72px;align-items:start}
+.res-layout{display:grid;grid-template-columns:1fr 1.5fr;gap:72px;align-items:start}
 .res-info h2{font-family:var(--serif);font-size:clamp(36px,3.8vw,58px);color:var(--c);margin:14px 0 22px;line-height:1.08}
 .res-info h2 i{font-style:italic;color:var(--g)}
 .res-info p{font-size:12px;font-weight:200;letter-spacing:.5px;color:var(--m);line-height:2.1;margin-bottom:38px}
@@ -151,7 +309,7 @@ nav.solid{background:rgba(5,5,10,.95);backdrop-filter:blur(18px);border-bottom:1
 .ci{display:flex;align-items:center;gap:14px;font-size:12px;font-weight:200;letter-spacing:.5px;color:var(--c2)}
 .ci-icon{width:34px;height:34px;border:1px solid var(--br);display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0}
 
-/* FORM BOX */
+/* form */
 .form-box{background:var(--b2);border:1px solid var(--bs);padding:46px;position:relative}
 .form-box::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(to right,transparent,var(--g),transparent)}
 .row2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
@@ -160,49 +318,21 @@ nav.solid{background:rgba(5,5,10,.95);backdrop-filter:blur(18px);border-bottom:1
 .fg input,.fg select,.fg textarea{width:100%;background:var(--b3);border:none;border-bottom:1px solid rgba(201,168,76,.2);color:var(--c);font-family:var(--sans);font-size:13px;font-weight:200;letter-spacing:.5px;padding:13px 14px;outline:none;transition:border-color .35s,background .35s;-webkit-appearance:none;appearance:none}
 .fg select{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='11' height='7' fill='none'%3E%3Cpath d='M1 1l4.5 4.5L10 1' stroke='%23c9a84c' stroke-width='1.4'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 14px center;cursor:pointer}
 .fg select option{background:var(--b3)}
+.fg select:disabled{opacity:.4;cursor:not-allowed}
 .fg textarea{resize:vertical;min-height:82px}
 .fg input:focus,.fg select:focus,.fg textarea:focus{border-bottom-color:var(--g);background:var(--b4)}
 .fg input::placeholder,.fg textarea::placeholder{color:var(--f)}
-.fg input:disabled,.fg select:disabled{opacity:.4;cursor:not-allowed}
-
-/* CALENDARIO */
-.cal-wrap{margin-bottom:22px}
-.cal-wrap label{display:block;font-size:9px;font-weight:300;letter-spacing:4px;text-transform:uppercase;color:var(--g);margin-bottom:12px}
-.cal-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
-.cal-month{font-family:var(--serif);font-size:18px;color:var(--c);letter-spacing:1px}
-.cal-nav{background:none;border:1px solid var(--br);color:var(--g);width:30px;height:30px;cursor:pointer;font-size:14px;transition:background .3s}
-.cal-nav:hover{background:var(--g);color:var(--b0)}
-.cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:3px}
-.cal-day-name{text-align:center;font-size:9px;letter-spacing:2px;color:var(--f);padding:6px 0;text-transform:uppercase}
-.cal-day{text-align:center;padding:8px 4px;font-size:12px;color:var(--m);cursor:default;border:1px solid transparent;transition:all .25s;border-radius:2px;min-width:0}
-.cal-day.available{color:var(--c2);cursor:pointer}
-.cal-day.available:hover{border-color:var(--g);color:var(--g)}
-.cal-day.selected{background:var(--g);color:var(--b0)!important;border-color:var(--g)}
-.cal-day.past,.cal-day.empty{color:var(--f);opacity:.35}
-.cal-day.today{border-color:var(--g3)}
-
-/* HORAS */
-.hours-wrap{margin-bottom:22px}
-.hours-wrap label{display:block;font-size:9px;font-weight:300;letter-spacing:4px;text-transform:uppercase;color:var(--g);margin-bottom:12px}
-.hours-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
-.hour-btn{padding:10px 6px;background:var(--b3);border:1px solid var(--bs);color:var(--c2);font-family:var(--sans);font-size:11px;font-weight:200;letter-spacing:1px;cursor:pointer;transition:all .25s;text-align:center}
-.hour-btn:hover:not(.taken):not(.disabled){border-color:var(--g);color:var(--g)}
-.hour-btn.selected{background:var(--g);border-color:var(--g);color:var(--b0)}
-.hour-btn.taken{background:var(--b3);border-color:transparent;color:var(--f);cursor:not-allowed;text-decoration:line-through;opacity:.45}
-.hour-btn.disabled{opacity:.3;cursor:not-allowed}
-.hours-hint{font-size:10px;color:var(--f);letter-spacing:1px;margin-top:8px}
-
-/* SUBMIT */
+.slots-loading{font-size:11px;color:var(--m);letter-spacing:2px;padding:8px 0;display:none}
 .btn-send{width:100%;padding:17px;background:transparent;border:1px solid var(--g);color:var(--g);font-family:var(--sans);font-size:11px;font-weight:300;letter-spacing:5px;text-transform:uppercase;cursor:pointer;transition:all .4s var(--ease);position:relative;overflow:hidden}
 .btn-send::before{content:'';position:absolute;inset:0;background:var(--g);transform:translateX(-100%);transition:transform .4s var(--ease);z-index:0}
 .btn-send span{position:relative;z-index:1;transition:color .4s}
 .btn-send:hover::before{transform:translateX(0)}.btn-send:hover span{color:var(--b0)}
 .btn-send:disabled{opacity:.45;cursor:not-allowed;pointer-events:none}
-#msg{margin-top:18px;padding:14px 18px;font-size:12px;letter-spacing:.5px;border-left:2px solid;display:none;animation:fadeIn .4s}
+#msg{margin-top:18px;padding:14px 18px;font-size:12px;letter-spacing:.5px;border-left:2px solid;display:none}
 #msg.ok{display:block;color:#7ec97e;border-color:#7ec97e;background:rgba(126,201,126,.06)}
 #msg.err{display:block;color:#e07070;border-color:#e07070;background:rgba(224,112,112,.06)}
 
-/* FOOTER */
+/* footer */
 footer{background:var(--b2);border-top:1px solid var(--bs);padding:56px 0 28px}
 .foot-grid{display:grid;grid-template-columns:1.6fr 1fr 1fr;gap:56px;margin-bottom:46px}
 .f-brand{font-family:var(--serif);font-size:26px;letter-spacing:2px;color:var(--c);margin-bottom:6px}
@@ -217,13 +347,10 @@ footer{background:var(--b2);border-top:1px solid var(--bs);padding:56px 0 28px}
 .foot-bottom{padding-top:28px;border-top:1px solid var(--bs);display:flex;justify-content:space-between}
 .f-copy{font-size:10px;color:var(--f);letter-spacing:2px}
 
-/* ANIMS */
 @keyframes up{from{opacity:0;transform:translateY(22px)}to{opacity:1;transform:translateY(0)}}
-@keyframes fadeIn{from{opacity:0}to{opacity:1}}
 .rev{opacity:0;transform:translateY(28px);transition:opacity .7s,transform .7s}
 .rev.in{opacity:1;transform:translateY(0)}
 
-/* RESPONSIVE */
 @media(max-width:920px){
   .nav-links{display:none}.wrap{padding:0 22px}
   .stats-row{grid-template-columns:repeat(2,1fr)}
@@ -231,17 +358,12 @@ footer{background:var(--b2);border-top:1px solid var(--bs);padding:56px 0 28px}
   .res-layout{grid-template-columns:1fr;gap:46px}
   .foot-grid{grid-template-columns:1fr;gap:36px}
   .row2{grid-template-columns:1fr}.form-box{padding:30px 22px}
-  .hours-grid{grid-template-columns:repeat(3,1fr)}
 }
-@media(max-width:560px){
-  section{padding:80px 0}.foot-bottom{flex-direction:column;gap:10px}
-  .hours-grid{grid-template-columns:repeat(3,1fr)}
-}
+@media(max-width:560px){section{padding:80px 0}.foot-bottom{flex-direction:column;gap:10px}}
 </style>
 </head>
 <body>
 
-<!-- NAV -->
 <nav id="nav">
   <div class="nav-wrap">
     <a href="#" class="logo">BARBER <em>&</em> CO.</a>
@@ -254,7 +376,6 @@ footer{background:var(--b2);border-top:1px solid var(--bs);padding:56px 0 28px}
   </div>
 </nav>
 
-<!-- HERO -->
 <section id="hero">
   <div class="hero-bg"></div>
   <div class="hero-grid"></div>
@@ -270,17 +391,18 @@ footer{background:var(--b2);border-top:1px solid var(--bs);padding:56px 0 28px}
   </div>
 </section>
 
-<!-- STATS -->
 <div id="stats">
   <div class="stats-row">
-    <div class="stat rev"><span class="stat-n">+2.000</span><span class="stat-l">Clientes Satisfechos</span></div>
+    <div class="stat rev">
+      <span class="stat-n">+2000</span>
+      <span class="stat-l">Clientes Satisfechos</span>
+    </div>
     <div class="stat rev"><span class="stat-n" data-n="6">0</span><span class="stat-l">Años de Experiencia</span></div>
     <div class="stat rev"><span class="stat-n" data-n="3">0</span><span class="stat-l">Maestros Barberos</span></div>
     <div class="stat rev"><span class="stat-n" data-n="7">0</span><span class="stat-l">Servicios Premium</span></div>
   </div>
 </div>
 
-<!-- SERVICIOS -->
 <section id="servicios">
   <div class="wrap">
     <div class="sec-head rev">
@@ -300,7 +422,6 @@ footer{background:var(--b2);border-top:1px solid var(--bs);padding:56px 0 28px}
   </div>
 </section>
 
-<!-- EQUIPO -->
 <section id="equipo">
   <div class="wrap">
     <div class="sec-head rev">
@@ -317,7 +438,6 @@ footer{background:var(--b2);border-top:1px solid var(--bs);padding:56px 0 28px}
   </div>
 </section>
 
-<!-- RESERVAS -->
 <section id="reservas">
   <div class="wrap">
     <div class="res-layout">
@@ -325,45 +445,16 @@ footer{background:var(--b2);border-top:1px solid var(--bs);padding:56px 0 28px}
         <p class="tag">Agenda tu visita</p>
         <div class="hline" style="margin:14px 0"></div>
         <h2>Reserva<br><i>tu hora</i></h2>
-        <p>Selecciona el día y la hora disponible. Las horas marcadas ya están reservadas. Recibirás un correo de confirmación al instante.</p>
+        <p>Elige una fecha y un horario disponible. Recibirás un correo de confirmación de inmediato.</p>
         <div class="contacts">
           <div class="ci"><span class="ci-icon">📍</span><span>Av. Providencia 1234, Santiago</span></div>
-          <div class="ci"><span class="ci-icon">🕐</span><span>Lun–Vie 10:00–20:00 &nbsp;·&nbsp; Sáb 10:00–17:00</span></div>
+          <div class="ci"><span class="ci-icon">🕐</span><span>Lun–Vie 10:00–19:00 &nbsp;·&nbsp; Sáb 10:00–14:00</span></div>
           <div class="ci"><span class="ci-icon">📞</span><span>+56 9 1234 5678</span></div>
           <div class="ci"><span class="ci-icon">✉️</span><span>contacto@barberandco.cl</span></div>
         </div>
       </div>
-
       <div class="form-box rev">
         <form id="form">
-
-          <!-- Calendario -->
-          <div class="cal-wrap">
-            <label>Selecciona una Fecha *</label>
-            <div class="cal-header">
-              <button type="button" class="cal-nav" id="prev">&#8249;</button>
-              <span class="cal-month" id="cal-title"></span>
-              <button type="button" class="cal-nav" id="next">&#8250;</button>
-            </div>
-            <div class="cal-grid" id="cal-days-names">
-              <div class="cal-day-name">Lun</div><div class="cal-day-name">Mar</div>
-              <div class="cal-day-name">Mié</div><div class="cal-day-name">Jue</div>
-              <div class="cal-day-name">Vie</div><div class="cal-day-name">Sáb</div>
-              <div class="cal-day-name">Dom</div>
-            </div>
-            <div class="cal-grid" id="cal-days"></div>
-            <input type="hidden" id="fecha" name="fecha" required>
-          </div>
-
-          <!-- Horas -->
-          <div class="hours-wrap">
-            <label>Selecciona una Hora *</label>
-            <div class="hours-grid" id="hours-grid">
-              <div style="font-size:11px;color:var(--f);grid-column:1/-1;padding:8px 0">← Primero selecciona una fecha</div>
-            </div>
-            <input type="hidden" id="hora" name="hora" required>
-          </div>
-
           <div class="row2">
             <div class="fg"><label for="nombre">Nombre *</label><input type="text" id="nombre" name="nombre" placeholder="Juan Pérez" required></div>
             <div class="fg"><label for="email">Correo *</label><input type="email" id="email" name="email" placeholder="juan@ejemplo.com" required></div>
@@ -384,7 +475,22 @@ footer{background:var(--b2);border-top:1px solid var(--bs);padding:56px 0 28px}
               </select>
             </div>
           </div>
-          <div class="fg"><label for="nota">Comentarios</label><textarea id="nota" name="comentarios" placeholder="Preferencias, alergias, etc…"></textarea></div>
+          <div class="row2">
+            <div class="fg">
+              <label for="fecha">Fecha *</label>
+              <select id="fecha" name="fecha" required>
+                <option value="" disabled selected>Selecciona fecha…</option>
+              </select>
+            </div>
+            <div class="fg">
+              <label for="hora">Hora *</label>
+              <select id="hora" name="hora" required disabled>
+                <option value="" disabled selected>Primero elige fecha…</option>
+              </select>
+              <p class="slots-loading" id="slots-loading">Cargando horarios…</p>
+            </div>
+          </div>
+          <div class="fg"><label for="nota">Comentarios</label><textarea id="nota" name="comentarios" placeholder="Preferencias, alergias, estilo deseado…"></textarea></div>
           <button type="submit" class="btn-send" id="btn"><span>Confirmar Reserva</span></button>
           <div id="msg" role="alert"></div>
         </form>
@@ -393,7 +499,6 @@ footer{background:var(--b2);border-top:1px solid var(--bs);padding:56px 0 28px}
   </div>
 </section>
 
-<!-- FOOTER -->
 <footer>
   <div class="wrap">
     <div class="foot-grid">
@@ -419,8 +524,8 @@ footer{background:var(--b2);border-top:1px solid var(--bs);padding:56px 0 28px}
         <p>✉️ contacto@barberandco.cl</p>
         <br>
         <h4>Horario</h4>
-        <p>Lun–Vie: 10:00–20:00</p>
-        <p>Sábado: 10:00–17:00</p>
+        <p>Lun–Vie: 10:00–19:00</p>
+        <p>Sábado: 10:00–14:00</p>
         <p>Domingo: Cerrado</p>
       </div>
     </div>
@@ -435,6 +540,8 @@ footer{background:var(--b2);border-top:1px solid var(--bs);padding:56px 0 28px}
 // ── nav ──
 const nav = document.getElementById('nav');
 window.addEventListener('scroll', () => nav.classList.toggle('solid', scrollY > 55), {passive:true});
+
+// ── smooth scroll ──
 document.querySelectorAll('a[href^="#"]').forEach(a =>
   a.addEventListener('click', e => {
     const t = document.querySelector(a.getAttribute('href'));
@@ -445,12 +552,12 @@ document.querySelectorAll('a[href^="#"]').forEach(a =>
 // ── reveal ──
 const ro = new IntersectionObserver((entries) => {
   entries.forEach((e,i) => {
-    if(e.isIntersecting){ setTimeout(()=>e.target.classList.add('in'),i*75); ro.unobserve(e.target); }
+    if(e.isIntersecting){ setTimeout(()=>e.target.classList.add('in'), i*75); ro.unobserve(e.target); }
   });
 },{threshold:.1});
 document.querySelectorAll('.rev').forEach(el => ro.observe(el));
 
-// ── counters ──
+// ── counters (solo los que tienen data-n) ──
 const co = new IntersectionObserver(entries => {
   entries.forEach(e => {
     if(!e.isIntersecting) return;
@@ -466,129 +573,66 @@ const co = new IntersectionObserver(entries => {
 },{threshold:.6});
 document.querySelectorAll('[data-n]').forEach(el => co.observe(el));
 
-// ─────────────────────────────────────
-//  CALENDARIO
-// ─────────────────────────────────────
-const MESES = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
-// Horas por día: lun-vie hasta 19:30, sáb hasta 16:30, dom cerrado
-const HORAS_SEMANA = ['10:00','10:30','11:00','11:30','12:00','12:30','13:00','13:30','14:00','14:30','15:00','15:30','16:00','16:30','17:00','17:30','18:00','18:30','19:00','19:30'];
-const HORAS_SABADO = ['10:00','10:30','11:00','11:30','12:00','12:30','13:00','13:30','14:00','14:30','15:00','15:30','16:00','16:30'];
+// ── fechas y horarios dinámicos ──
+const selFecha = document.getElementById('fecha');
+const selHora  = document.getElementById('hora');
+const loadingEl = document.getElementById('slots-loading');
 
-let calYear, calMonth, selectedDate = null, selectedHora = null;
-
-function initCal(){
-  const now = new Date();
-  calYear = now.getFullYear();
-  calMonth = now.getMonth();
-  renderCal();
-}
-
-function renderCal(){
-  const title = document.getElementById('cal-title');
-  title.textContent = MESES[calMonth] + ' ' + calYear;
-
-  const grid = document.getElementById('cal-days');
-  grid.innerHTML = '';
-
-  const today = new Date(); today.setHours(0,0,0,0);
-  const first = new Date(calYear, calMonth, 1);
-  // Monday-based: getDay() 0=Sun→6, 1=Mon→0 ...
-  let startOffset = (first.getDay() + 6) % 7;
-
-  for(let i = 0; i < startOffset; i++){
-    const el = document.createElement('div');
-    el.className = 'cal-day empty'; grid.appendChild(el);
-  }
-
-  const days = new Date(calYear, calMonth+1, 0).getDate();
-  for(let d = 1; d <= days; d++){
-    const date = new Date(calYear, calMonth, d);
-    const dow = date.getDay(); // 0=Sun,6=Sat
-    const iso = isoDate(calYear, calMonth, d);
-    const el = document.createElement('div');
-    el.textContent = d;
-
-    const isPast = date < today;
-    const isSun  = dow === 0;
-
-    if(isPast || isSun){
-      el.className = 'cal-day past';
-    } else {
-      el.className = 'cal-day available';
-      if(date.getTime() === today.getTime()) el.classList.add('today');
-      if(iso === selectedDate) el.classList.add('selected');
-      el.addEventListener('click', () => selectDate(iso, el));
-    }
-    grid.appendChild(el);
-  }
-}
-
-function isoDate(y, m, d){
-  return y + '-' + String(m+1).padStart(2,'0') + '-' + String(d).padStart(2,'0');
-}
-
-function selectDate(iso, el){
-  selectedDate = iso;
-  selectedHora = null;
-  document.getElementById('fecha').value = iso;
-  document.getElementById('hora').value = '';
-  document.querySelectorAll('.cal-day.selected').forEach(e => e.classList.remove('selected'));
-  el.classList.add('selected');
-  loadHours(iso);
-}
-
-async function loadHours(iso){
-  const grid = document.getElementById('hours-grid');
-  grid.innerHTML = '<div style="font-size:11px;color:var(--f);grid-column:1/-1;padding:8px 0">Cargando disponibilidad…</div>';
-
-  // Día de la semana para saber qué horas mostrar
-  const [y,m,d] = iso.split('-').map(Number);
-  const dow = new Date(y, m-1, d).getDay(); // 6=Sat
-  const horas = dow === 6 ? HORAS_SABADO : HORAS_SEMANA;
-
-  let ocupados = [];
+// Cargar fechas disponibles al iniciar
+async function cargarFechas() {
   try {
-    const r = await fetch('/api/disponibilidad?fecha=' + iso);
-    const data = await r.json();
-    ocupados = data.ocupados || [];
-  } catch(e){ console.error(e); }
-
-  grid.innerHTML = '';
-  horas.forEach(h => {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.textContent = h;
-    const taken = ocupados.includes(h);
-    btn.className = 'hour-btn' + (taken ? ' taken' : '');
-    if(!taken){
-      btn.addEventListener('click', () => {
-        document.querySelectorAll('.hour-btn.selected').forEach(b => b.classList.remove('selected'));
-        btn.classList.add('selected');
-        selectedHora = h;
-        document.getElementById('hora').value = h;
-      });
-    }
-    grid.appendChild(btn);
-  });
-
-  const hint = document.createElement('div');
-  hint.className = 'hours-hint';
-  hint.textContent = ocupados.length > 0 ? '✕ = hora ya reservada' : 'Todos los horarios disponibles';
-  grid.appendChild(hint);
+    const r = await fetch('/api/horarios');
+    const d = await r.json();
+    selFecha.innerHTML = '<option value="" disabled selected>Selecciona fecha…</option>';
+    d.fechas.forEach(f => {
+      const opt = document.createElement('option');
+      opt.value = f.iso;
+      opt.textContent = f.label;
+      selFecha.appendChild(opt);
+    });
+  } catch(err) {
+    console.error('Error cargando fechas:', err);
+  }
 }
 
-document.getElementById('prev').addEventListener('click', () => {
-  calMonth--; if(calMonth < 0){ calMonth = 11; calYear--; } renderCal();
-});
-document.getElementById('next').addEventListener('click', () => {
-  calMonth++; if(calMonth > 11){ calMonth = 0; calYear++; } renderCal();
+// Cuando el usuario elige fecha, cargar horas disponibles
+selFecha.addEventListener('change', async () => {
+  const fecha = selFecha.value;
+  if(!fecha) return;
+
+  selHora.disabled = true;
+  selHora.innerHTML = '<option value="" disabled selected>Cargando…</option>';
+  loadingEl.style.display = 'block';
+
+  try {
+    const r = await fetch('/api/horarios');
+    const d = await r.json();
+    const fechaData = d.fechas.find(f => f.iso === fecha);
+    const horas = fechaData ? fechaData.horas : [];
+
+    selHora.innerHTML = '';
+    if(horas.length === 0){
+      selHora.innerHTML = '<option value="" disabled selected>Sin horarios disponibles</option>';
+    } else {
+      selHora.innerHTML = '<option value="" disabled selected>Elige una hora…</option>';
+      horas.forEach(h => {
+        const opt = document.createElement('option');
+        opt.value = h;
+        opt.textContent = h;
+        selHora.appendChild(opt);
+      });
+      selHora.disabled = false;
+    }
+  } catch(err) {
+    selHora.innerHTML = '<option value="" disabled selected>Error cargando horas</option>';
+  } finally {
+    loadingEl.style.display = 'none';
+  }
 });
 
-initCal();
+cargarFechas();
 
-// ─────────────────────────────────────
-//  FORMULARIO
-// ─────────────────────────────────────
+// ── form ──
 const form = document.getElementById('form');
 const btn  = document.getElementById('btn');
 const msg  = document.getElementById('msg');
@@ -597,21 +641,17 @@ function showMsg(text, type){ msg.textContent = text; msg.className = type; }
 
 form.addEventListener('submit', async e => {
   e.preventDefault();
-
-  if(!selectedDate){ showMsg('Por favor selecciona una fecha en el calendario.','err'); return; }
-  if(!selectedHora){ showMsg('Por favor selecciona una hora disponible.','err'); return; }
-
   const data = {
     nombre:      form.nombre.value.trim(),
     email:       form.email.value.trim(),
     telefono:    form.telefono.value.trim(),
     servicio:    form.servicio.value,
-    fecha:       selectedDate,
-    hora:        selectedHora,
+    fecha:       form.fecha.value,
+    hora:        form.hora.value,
     comentarios: form.comentarios.value.trim()
   };
 
-  if(!data.nombre||!data.email||!data.telefono||!data.servicio){
+  if(!data.nombre||!data.email||!data.telefono||!data.servicio||!data.fecha||!data.hora){
     showMsg('Por favor completa todos los campos obligatorios.','err'); return;
   }
 
@@ -627,18 +667,14 @@ form.addEventListener('submit', async e => {
     });
     const d = await r.json();
     if(d.success){
-      showMsg('✓ ' + d.message, 'ok');
+      showMsg('✓ ' + d.message,'ok');
       form.reset();
-      selectedDate = null; selectedHora = null;
-      document.getElementById('fecha').value = '';
-      document.getElementById('hora').value = '';
-      // Recargar horas para reflejar la nueva reserva
-      loadHours(data.fecha);
-      renderCal();
+      selHora.disabled = true;
+      selHora.innerHTML = '<option value="" disabled selected>Primero elige fecha…</option>';
+      // Recargar fechas para reflejar el horario ocupado
+      await cargarFechas();
     } else {
       showMsg(d.message||'Error al procesar la reserva.','err');
-      // Recargar horas por si alguien más tomó la hora
-      if(selectedDate) loadHours(selectedDate);
     }
   } catch(_){
     showMsg('Error de conexión. Por favor intenta nuevamente.','err');
@@ -651,156 +687,96 @@ form.addEventListener('submit', async e => {
 </body>
 </html>`;
 
-/* ─────────────────────────────────────────────
-   CORREOS
-───────────────────────────────────────────── */
-const SERVICIOS = {
-  corte:'Corte de Cabello', corte_barba:'Corte + Barba',
-  barba:'Arreglo de Barba', afeitado:'Afeitado Clásico',
-  coloracion:'Coloración', tratamiento:'Tratamiento Capilar', combo:'Combo Completo'
-};
+/* ═══════════════════════════════════════════════════════
+   RUTAS API
+═══════════════════════════════════════════════════════ */
 
-function fmtFecha(iso){
-  const [y,m,d] = iso.split('-');
-  const meses = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
-  return parseInt(d)+' de '+meses[parseInt(m)-1]+' de '+y;
-}
-
-function htmlCliente({nombre, telefono, servicio, fecha, hora, comentarios}){
-  const svc = SERVICIOS[servicio]||servicio;
-  const fechaFmt = fmtFecha(fecha);
-  return `<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
-  <body style="margin:0;padding:0;background:#07070c;font-family:Georgia,serif">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#07070c;padding:36px 0">
-  <tr><td align="center"><table width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%">
-    <tr><td style="background:#101018;border-top:3px solid #c9a84c;padding:36px 28px;text-align:center">
-      <p style="margin:0;color:#c9a84c;letter-spacing:7px;font-size:10px;text-transform:uppercase;font-family:Arial,sans-serif">Est. 2018</p>
-      <h1 style="margin:9px 0 4px;color:#f5f0e8;font-size:32px;letter-spacing:4px">BARBER & CO.</h1>
-      <p style="margin:0;color:#777;letter-spacing:3px;font-size:9px;text-transform:uppercase;font-family:Arial,sans-serif">The Art of Grooming</p>
-    </td></tr>
-    <tr><td style="background:#141420;padding:36px 32px">
-      <p style="margin:0 0 6px;color:#c9a84c;font-size:10px;letter-spacing:5px;text-transform:uppercase;font-family:Arial,sans-serif">Reserva Confirmada</p>
-      <p style="margin:0 0 14px;color:#d4c9b0;font-size:16px;line-height:1.8">Estimado/a <strong style="color:#f5f0e8">${nombre}</strong>,</p>
-      <p style="margin:0 0 28px;color:#888;font-size:13px;line-height:1.85">Tu reserva ha sido confirmada. Te esperamos con todo nuestro equipo.</p>
-      <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #252530;border-top:2px solid #c9a84c">
-        <tr><td style="padding:18px 22px;border-bottom:1px solid #252530">
-          <p style="margin:0;color:#555;font-size:9px;letter-spacing:3px;text-transform:uppercase;font-family:Arial,sans-serif">Servicio</p>
-          <p style="margin:5px 0 0;color:#f5f0e8;font-size:15px">${svc}</p>
-        </td></tr>
-        <tr><td style="padding:18px 22px;border-bottom:1px solid #252530">
-          <table width="100%"><tr>
-            <td width="50%"><p style="margin:0;color:#555;font-size:9px;letter-spacing:3px;text-transform:uppercase;font-family:Arial,sans-serif">Fecha</p><p style="margin:5px 0 0;color:#f5f0e8;font-size:15px">${fechaFmt}</p></td>
-            <td width="50%"><p style="margin:0;color:#555;font-size:9px;letter-spacing:3px;text-transform:uppercase;font-family:Arial,sans-serif">Hora</p><p style="margin:5px 0 0;color:#f5f0e8;font-size:15px">${hora}</p></td>
-          </tr></table>
-        </td></tr>
-        <tr><td style="padding:18px 22px${comentarios?';border-bottom:1px solid #252530':''}">
-          <p style="margin:0;color:#555;font-size:9px;letter-spacing:3px;text-transform:uppercase;font-family:Arial,sans-serif">Teléfono</p>
-          <p style="margin:5px 0 0;color:#f5f0e8;font-size:15px">${telefono}</p>
-        </td></tr>
-        ${comentarios?`<tr><td style="padding:18px 22px"><p style="margin:0;color:#555;font-size:9px;letter-spacing:3px;text-transform:uppercase;font-family:Arial,sans-serif">Comentarios</p><p style="margin:5px 0 0;color:#c2b89a;font-size:13px">${comentarios}</p></td></tr>`:''}
-      </table>
-      <p style="margin:26px 0 0;color:#555;font-size:11px;text-align:center">¿Necesitas cancelar? Contáctanos 24h antes · 📞 +56 9 1234 5678</p>
-    </td></tr>
-    <tr><td style="background:#07070c;padding:22px;text-align:center"><p style="margin:0;color:#333;font-size:10px;letter-spacing:2px;text-transform:uppercase;font-family:Arial,sans-serif">Barber & Co. · Santiago, Chile</p></td></tr>
-  </table></td></tr></table></body></html>`;
-}
-
-function htmlAdmin({nombre, email, telefono, servicio, fecha, hora, comentarios}){
-  const svc = SERVICIOS[servicio]||servicio;
-  return `<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
-  <body style="margin:0;padding:24px;background:#f0f0f0;font-family:Arial,sans-serif">
-  <div style="max-width:520px;margin:0 auto;background:#fff;border-top:4px solid #c9a84c;padding:28px 32px">
-    <h2 style="margin:0 0 20px;color:#c9a84c;font-size:16px;letter-spacing:2px;text-transform:uppercase">🔔 Nueva Reserva</h2>
-    <table cellpadding="0" cellspacing="0" width="100%">
-      <tr><td style="padding:9px 0;border-bottom:1px solid #eee;color:#888;font-size:11px;width:110px">Cliente</td><td style="padding:9px 0;border-bottom:1px solid #eee;color:#222;font-size:13px"><strong>${nombre}</strong></td></tr>
-      <tr><td style="padding:9px 0;border-bottom:1px solid #eee;color:#888;font-size:11px">Email</td><td style="padding:9px 0;border-bottom:1px solid #eee;color:#222;font-size:13px">${email}</td></tr>
-      <tr><td style="padding:9px 0;border-bottom:1px solid #eee;color:#888;font-size:11px">Teléfono</td><td style="padding:9px 0;border-bottom:1px solid #eee;color:#222;font-size:13px">${telefono}</td></tr>
-      <tr><td style="padding:9px 0;border-bottom:1px solid #eee;color:#888;font-size:11px">Servicio</td><td style="padding:9px 0;border-bottom:1px solid #eee;color:#222;font-size:13px">${svc}</td></tr>
-      <tr><td style="padding:9px 0;border-bottom:1px solid #eee;color:#888;font-size:11px">Fecha</td><td style="padding:9px 0;border-bottom:1px solid #eee;color:#222;font-size:13px"><strong>${fmtFecha(fecha)}</strong></td></tr>
-      <tr><td style="padding:9px 0;border-bottom:1px solid #eee;color:#888;font-size:11px">Hora</td><td style="padding:9px 0;border-bottom:1px solid #eee;color:#222;font-size:13px"><strong>${hora}</strong></td></tr>
-      <tr><td style="padding:9px 0;color:#888;font-size:11px">Comentarios</td><td style="padding:9px 0;color:#222;font-size:13px">${comentarios||'—'}</td></tr>
-    </table>
-  </div></body></html>`;
-}
-
-/* ─────────────────────────────────────────────
-   RUTAS
-───────────────────────────────────────────── */
-app.get('/', (_req, res) => res.send(PAGE));
-
-// Devuelve las horas ya ocupadas para una fecha
-app.get('/api/disponibilidad', (req, res) => {
-  const { fecha } = req.query;
-  if (!fecha) return res.status(400).json({ error: 'Falta fecha' });
-  res.json({ ocupados: getOcupadosPorFecha(fecha) });
+// GET /api/horarios — devuelve fechas con sus horas libres
+app.get('/api/horarios', (_req, res) => {
+  const fechasISO = getFechasDisponibles();
+  const fechas = fechasISO.map(iso => ({
+    iso,
+    label: `${formatDiaSemana(iso)} ${formatFecha(iso)}`,
+    horas: getHorasLibres(iso),
+  }));
+  res.json({ fechas });
 });
 
+// POST /api/reservar
 app.post('/api/reservar', async (req, res) => {
   const { nombre, email, telefono, servicio, fecha, hora, comentarios } = req.body;
 
+  // Validación de campos
   if (!nombre || !email || !telefono || !servicio || !fecha || !hora) {
-    return res.status(400).json({ success:false, message:'Por favor completa todos los campos obligatorios.' });
+    return res.status(400).json({ success: false, message: 'Por favor completa todos los campos obligatorios.' });
   }
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return res.status(400).json({ success:false, message:'El formato del correo no es válido.' });
+    return res.status(400).json({ success: false, message: 'El formato del correo no es válido.' });
+  }
+  if (!SERVICIOS[servicio]) {
+    return res.status(400).json({ success: false, message: 'Servicio no válido.' });
   }
 
-  // Verificar si la hora ya fue tomada
-  if (isSlotTaken(fecha, hora)) {
-    return res.status(409).json({ success:false, message:`Lo sentimos, las ${hora} del ${fmtFecha(fecha)} ya fue reservada. Por favor elige otra hora.` });
+  // Validar que la fecha esté en el rango disponible
+  const fechasValidas = getFechasDisponibles();
+  if (!fechasValidas.includes(fecha)) {
+    return res.status(400).json({ success: false, message: 'La fecha seleccionada no está disponible.' });
   }
 
-  // Guardar reserva
-  saveReserva({ nombre, email, telefono, servicio, fecha, hora, comentarios: comentarios||'' });
-  console.log(`✅ Reserva guardada: ${nombre} — ${fecha} ${hora}`);
-
-  // Sin SMTP → modo demo
-  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-    console.log('⚠️  SMTP no configurado — modo demo');
-    return res.json({ success:true, message:`¡Reserva confirmada, ${nombre}! Tu hora del ${fmtFecha(fecha)} a las ${hora} está reservada.` });
+  // Validar que la hora esté en los horarios disponibles
+  if (!HORAS_DISPONIBLES.includes(hora)) {
+    return res.status(400).json({ success: false, message: 'La hora seleccionada no es válida.' });
   }
 
+  // Verificar si el horario ya está reservado
+  const key = `${fecha}|${hora}`;
+  if (reservas.has(key)) {
+    return res.status(409).json({ success: false, message: 'Este horario ya está reservado. Por favor elige otro.' });
+  }
+
+  // Guardar la reserva en memoria
+  reservas.set(key, { nombre, email, telefono, servicio, fecha, hora, comentarios, creadoEn: new Date().toISOString() });
+  console.log(`✅ Reserva registrada: ${nombre} | ${fecha} ${hora} | ${servicio}`);
+  console.log(`📋 Total reservas activas: ${reservas.size}`);
+
+  // Enviar correos con Resend
   try {
-    const transport = nodemailer.createTransport({
-      host: process.env.SMTP_HOST || 'smtp.gmail.com',
-      port: Number(process.env.SMTP_PORT) || 587,
-      secure: false,
-      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-      tls: { rejectUnauthorized: false }
-    });
-
-    await transport.sendMail({
-      from:    `"Barber & Co." <${process.env.SMTP_USER}>`,
-      to:      email,
-      subject: `✅ Reserva confirmada — ${fmtFecha(fecha)} a las ${hora}`,
-      html:    htmlCliente({ nombre, telefono, servicio, fecha, hora, comentarios })
-    });
-
-    await transport.sendMail({
-      from:    `"Sistema de Reservas" <${process.env.SMTP_USER}>`,
-      to:      process.env.SMTP_USER,
-      subject: `🔔 Nueva reserva: ${nombre} — ${fmtFecha(fecha)} ${hora}`,
-      html:    htmlAdmin({ nombre, email, telefono, servicio, fecha, hora, comentarios })
-    });
-
-    console.log(`📧 Correos enviados a ${email} y ${process.env.SMTP_USER}`);
-    res.json({ success:true, message:`¡Reserva confirmada, ${nombre}! Te enviamos un correo de confirmación a ${email}.` });
-
+    await enviarCorreos({ nombre, email, telefono, servicio, fecha, hora, comentarios });
   } catch (err) {
-    console.error('❌ Error SMTP:', err.code, err.message);
-    // La reserva ya se guardó, solo falló el correo
-    res.json({ success:true, message:`¡Reserva confirmada, ${nombre}! Tu hora está guardada (hubo un problema al enviar el correo, contáctanos si necesitas confirmación).` });
+    console.error('❌ Error al enviar correos:', err.message);
+    // La reserva ya fue guardada, solo falló el correo
+    return res.json({
+      success: true,
+      message: `¡Reserva confirmada, ${nombre}! Tu cita para el ${formatFecha(fecha)} a las ${hora} está registrada. (El correo de confirmación no pudo enviarse, contáctanos si lo necesitas.)`
+    });
   }
+
+  res.json({
+    success: true,
+    message: `¡Reserva confirmada, ${nombre}! Te enviamos un correo de confirmación a ${email}. Tu cita es el ${formatFecha(fecha)} a las ${hora}.`
+  });
 });
 
-app.get('/health', (_req, res) => res.json({ ok:true, smtp: !!process.env.SMTP_USER }));
+// GET /health
+app.get('/health', (_req, res) => {
+  res.json({
+    ok:      true,
+    resend:  !!process.env.RESEND_API_KEY,
+    reservas: reservas.size,
+  });
+});
+
+/* ═══════════════════════════════════════════════════════
+   INICIO
+═══════════════════════════════════════════════════════ */
+app.get('/', (_req, res) => res.send(PAGE));
 
 app.listen(PORT, () => {
-  console.log('\n  ┌──────────────────────────────────┐');
-  console.log('  │      BARBER & CO.  — Online      │');
-  console.log('  └──────────────────────────────────┘');
+  console.log('\n  ┌──────────────────────────────────────┐');
+  console.log('  │        BARBER & CO.  — Online        │');
+  console.log('  └──────────────────────────────────────┘');
   console.log(`  🚀  http://localhost:${PORT}`);
-  console.log(`  📧  SMTP: ${process.env.SMTP_USER ? '✅ '+process.env.SMTP_USER : '⚠️  no configurado (modo demo)'}`);
-  console.log(`  💾  DB: ${DB_PATH}`);
+  console.log(`  📧  Resend: ${process.env.RESEND_API_KEY ? '✅ configurado' : '⚠️  no configurado (modo demo)'}`);
+  console.log(`  📅  Mostrando ${DIAS_ADELANTE} días · ${HORAS_DISPONIBLES.length} horarios/día`);
   console.log();
 });
