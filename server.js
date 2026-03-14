@@ -1,8 +1,7 @@
 require('dotenv').config();
-
-const express    = require('express');
-const nodemailer = require('nodemailer');
-const cors       = require('cors');
+const express = require('express');
+const { Resend } = require('resend');
+const cors = require('cors');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -11,9 +10,7 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-/* ─────────────────────────────────────────────
-   HTML DE LA PÁGINA COMPLETA
-───────────────────────────────────────────── */
+/* ── HTML ── */
 const PAGE = String.raw`<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -476,9 +473,8 @@ function fmtDate(s){
 </body>
 </html>`;
 
-/* ─────────────────────────────────────────────
-   CORREO AL CLIENTE
-───────────────────────────────────────────── */
+
+/* ── EMAIL TEMPLATES ── */
 const SERVICIOS = {
   corte:'Corte de Cabello', corte_barba:'Corte + Barba',
   barba:'Arreglo de Barba', afeitado:'Afeitado Clásico',
@@ -487,75 +483,50 @@ const SERVICIOS = {
 
 function htmlCliente({nombre, telefono, servicio, fecha, hora, comentarios}){
   const svc = SERVICIOS[servicio] || servicio;
-  return `<!DOCTYPE html><html><head><meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1"></head>
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
   <body style="margin:0;padding:0;background:#07070c;font-family:Georgia,serif">
   <table width="100%" cellpadding="0" cellspacing="0" style="background:#07070c;padding:36px 0">
-  <tr><td align="center">
-  <table width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%">
-
+  <tr><td align="center"><table width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%">
     <tr><td style="background:#101018;border-top:3px solid #c9a84c;padding:36px 28px;text-align:center">
       <p style="margin:0;color:#c9a84c;letter-spacing:7px;font-size:10px;text-transform:uppercase;font-family:Arial,sans-serif">Est. 2018</p>
       <h1 style="margin:9px 0 4px;color:#f5f0e8;font-size:32px;letter-spacing:4px">BARBER & CO.</h1>
       <p style="margin:0;color:#777;letter-spacing:3px;font-size:9px;text-transform:uppercase;font-family:Arial,sans-serif">The Art of Grooming</p>
     </td></tr>
-
     <tr><td style="background:#141420;padding:36px 32px">
       <p style="margin:0 0 6px;color:#c9a84c;font-size:10px;letter-spacing:5px;text-transform:uppercase;font-family:Arial,sans-serif">Reserva Confirmada</p>
       <p style="margin:0 0 14px;color:#d4c9b0;font-size:16px;line-height:1.8">Estimado/a <strong style="color:#f5f0e8">${nombre}</strong>,</p>
-      <p style="margin:0 0 28px;color:#888;font-size:13px;line-height:1.85">Tu reserva ha sido confirmada exitosamente. Te esperamos con todo nuestro equipo listo para brindarte la mejor experiencia.</p>
-
-      <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #252530;border-top:2px solid #c9a84c">
+      <p style="margin:0 0 28px;color:#888;font-size:13px;line-height:1.85">Tu reserva ha sido confirmada. Te esperamos con todo nuestro equipo listo para brindarte la mejor experiencia.</p>
+      <table width="100%" style="border:1px solid #252530;border-top:2px solid #c9a84c">
         <tr><td style="padding:18px 22px;border-bottom:1px solid #252530">
           <p style="margin:0;color:#555;font-size:9px;letter-spacing:3px;text-transform:uppercase;font-family:Arial,sans-serif">Servicio</p>
           <p style="margin:5px 0 0;color:#f5f0e8;font-size:15px">${svc}</p>
         </td></tr>
         <tr><td style="padding:18px 22px;border-bottom:1px solid #252530">
           <table width="100%"><tr>
-            <td width="50%">
-              <p style="margin:0;color:#555;font-size:9px;letter-spacing:3px;text-transform:uppercase;font-family:Arial,sans-serif">Fecha</p>
-              <p style="margin:5px 0 0;color:#f5f0e8;font-size:15px">${fecha}</p>
-            </td>
-            <td width="50%">
-              <p style="margin:0;color:#555;font-size:9px;letter-spacing:3px;text-transform:uppercase;font-family:Arial,sans-serif">Hora</p>
-              <p style="margin:5px 0 0;color:#f5f0e8;font-size:15px">${hora}</p>
-            </td>
+            <td width="50%"><p style="margin:0;color:#555;font-size:9px;letter-spacing:3px;text-transform:uppercase;font-family:Arial,sans-serif">Fecha</p><p style="margin:5px 0 0;color:#f5f0e8;font-size:15px">${fecha}</p></td>
+            <td width="50%"><p style="margin:0;color:#555;font-size:9px;letter-spacing:3px;text-transform:uppercase;font-family:Arial,sans-serif">Hora</p><p style="margin:5px 0 0;color:#f5f0e8;font-size:15px">${hora}</p></td>
           </tr></table>
         </td></tr>
-        <tr><td style="padding:18px 22px${comentarios ? ';border-bottom:1px solid #252530' : ''}">
+        <tr><td style="padding:18px 22px">
           <p style="margin:0;color:#555;font-size:9px;letter-spacing:3px;text-transform:uppercase;font-family:Arial,sans-serif">Teléfono</p>
           <p style="margin:5px 0 0;color:#f5f0e8;font-size:15px">${telefono}</p>
         </td></tr>
-        ${comentarios ? `<tr><td style="padding:18px 22px">
-          <p style="margin:0;color:#555;font-size:9px;letter-spacing:3px;text-transform:uppercase;font-family:Arial,sans-serif">Comentarios</p>
-          <p style="margin:5px 0 0;color:#c2b89a;font-size:13px;line-height:1.7">${comentarios}</p>
-        </td></tr>` : ''}
+        ${comentarios ? `<tr><td style="padding:18px 22px;border-top:1px solid #252530"><p style="margin:0;color:#555;font-size:9px;letter-spacing:3px;text-transform:uppercase;font-family:Arial,sans-serif">Comentarios</p><p style="margin:5px 0 0;color:#c2b89a;font-size:13px">${comentarios}</p></td></tr>` : ''}
       </table>
-
-      <p style="margin:26px 0 0;color:#555;font-size:11px;text-align:center;line-height:1.7">
-        ¿Necesitas cancelar o cambiar tu hora? Contáctanos con al menos <strong style="color:#c9a84c">24 horas de anticipación</strong>.<br>
-        📞 +56 9 1234 5678
-      </p>
+      <p style="margin:26px 0 0;color:#555;font-size:11px;text-align:center">¿Necesitas cancelar? Contáctanos 24h antes · 📞 +56 9 1234 5678</p>
     </td></tr>
-
     <tr><td style="background:#07070c;padding:22px;text-align:center">
       <p style="margin:0;color:#333;font-size:10px;letter-spacing:2px;text-transform:uppercase;font-family:Arial,sans-serif">Barber & Co. · Santiago, Chile</p>
     </td></tr>
-
-  </table>
-  </td></tr>
-  </table>
-  </body></html>`;
+  </table></td></tr></table></body></html>`;
 }
 
 function htmlAdmin({nombre, email, telefono, servicio, fecha, hora, comentarios}){
   const svc = SERVICIOS[servicio] || servicio;
-  return `<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
-  <body style="margin:0;padding:24px;background:#f0f0f0;font-family:Arial,sans-serif">
-  <div style="max-width:520px;margin:0 auto;background:#fff;border-top:4px solid #c9a84c;padding:28px 32px;border-radius:2px">
+  return `<div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;background:#fff;border-top:4px solid #c9a84c;padding:28px 32px">
     <h2 style="margin:0 0 20px;color:#c9a84c;font-size:16px;letter-spacing:2px;text-transform:uppercase">🔔 Nueva Reserva</h2>
     <table cellpadding="0" cellspacing="0" width="100%">
-      <tr><td style="padding:9px 0;border-bottom:1px solid #eee;color:#888;font-size:11px;width:120px">Cliente</td><td style="padding:9px 0;border-bottom:1px solid #eee;color:#222;font-size:13px"><strong>${nombre}</strong></td></tr>
+      <tr><td style="padding:9px 0;border-bottom:1px solid #eee;color:#888;font-size:11px;width:110px">Cliente</td><td style="padding:9px 0;border-bottom:1px solid #eee;color:#222;font-size:13px"><strong>${nombre}</strong></td></tr>
       <tr><td style="padding:9px 0;border-bottom:1px solid #eee;color:#888;font-size:11px">Email</td><td style="padding:9px 0;border-bottom:1px solid #eee;color:#222;font-size:13px">${email}</td></tr>
       <tr><td style="padding:9px 0;border-bottom:1px solid #eee;color:#888;font-size:11px">Teléfono</td><td style="padding:9px 0;border-bottom:1px solid #eee;color:#222;font-size:13px">${telefono}</td></tr>
       <tr><td style="padding:9px 0;border-bottom:1px solid #eee;color:#888;font-size:11px">Servicio</td><td style="padding:9px 0;border-bottom:1px solid #eee;color:#222;font-size:13px">${svc}</td></tr>
@@ -563,19 +534,15 @@ function htmlAdmin({nombre, email, telefono, servicio, fecha, hora, comentarios}
       <tr><td style="padding:9px 0;border-bottom:1px solid #eee;color:#888;font-size:11px">Hora</td><td style="padding:9px 0;border-bottom:1px solid #eee;color:#222;font-size:13px"><strong>${hora}</strong></td></tr>
       <tr><td style="padding:9px 0;color:#888;font-size:11px">Comentarios</td><td style="padding:9px 0;color:#222;font-size:13px">${comentarios||'—'}</td></tr>
     </table>
-  </div>
-  </body></html>`;
+  </div>`;
 }
 
-/* ─────────────────────────────────────────────
-   RUTAS
-───────────────────────────────────────────── */
+/* ── RUTAS ── */
 app.get('/', (_req, res) => res.send(PAGE));
 
 app.post('/api/reservar', async (req, res) => {
   const { nombre, email, telefono, servicio, fecha, hora, comentarios } = req.body;
 
-  // Validación
   if (!nombre || !email || !telefono || !servicio || !fecha || !hora) {
     return res.status(400).json({ success:false, message:'Por favor completa todos los campos obligatorios.' });
   }
@@ -585,77 +552,53 @@ app.post('/api/reservar', async (req, res) => {
 
   console.log(`📩 Reserva: ${nombre} | ${servicio} | ${fecha} ${hora}`);
 
-  // Sin SMTP → modo demo
-  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-    console.log('⚠️  SMTP no configurado — modo demo');
-    return res.json({ success:true, message:`¡Reserva registrada, ${nombre}! (Modo demo — configura SMTP para recibir correos reales)` });
+  if (!process.env.RESEND_API_KEY) {
+    console.log('⚠️  RESEND_API_KEY no configurado — modo demo');
+    return res.json({ success:true, message:`¡Reserva registrada, ${nombre}! (Modo demo — configura RESEND_API_KEY para enviar correos)` });
   }
 
-
-  console.log('🔧 SMTP config:', {
-    host: process.env.SMTP_HOST || 'smtp.gmail.com',
-    port: process.env.SMTP_PORT || 587,
-    user: process.env.SMTP_USER,
-    passChars: process.env.SMTP_PASS ? process.env.SMTP_PASS.length : 0
-  });
-
   try {
-    const transport = nodemailer.createTransport({
-      host: process.env.SMTP_HOST || 'smtp.gmail.com',
-      port: Number(process.env.SMTP_PORT) || 587,
-      secure: false,
-      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-      tls:  { rejectUnauthorized: false }
-    });
-
-    console.log('🔌 Verificando conexion SMTP...');
-    await transport.verify();
-    console.log('✅ Conexion SMTP OK');
+    const resend = new Resend(process.env.RESEND_API_KEY);
+    const fromAddr = process.env.RESEND_FROM || 'onboarding@resend.dev';
+    const toAdmin  = process.env.NOTIF_EMAIL  || process.env.RESEND_FROM || 'onboarding@resend.dev';
 
     console.log('📧 Enviando correo al cliente:', email);
-    await transport.sendMail({
-      from:    `"Barber & Co." <${process.env.SMTP_USER}>`,
-      to:      email,
-      subject: `Reserva confirmada — ${fecha} a las ${hora}`,
+    const r1 = await resend.emails.send({
+      from:    `Barber & Co. <${fromAddr}>`,
+      to:      [email],
+      subject: `✅ Reserva confirmada — ${fecha} a las ${hora}`,
       html:    htmlCliente({ nombre, telefono, servicio, fecha, hora, comentarios })
     });
-    console.log('✅ Correo al cliente enviado');
+    console.log('✅ Correo cliente:', r1.data?.id || JSON.stringify(r1));
 
-    console.log('📧 Enviando notificacion a:', process.env.SMTP_USER);
-    await transport.sendMail({
-      from:    `"Sistema de Reservas" <${process.env.SMTP_USER}>`,
-      to:      process.env.SMTP_USER,
-      subject: `Nueva reserva: ${nombre} — ${fecha} ${hora}`,
+    console.log('📧 Enviando notificación a:', toAdmin);
+    const r2 = await resend.emails.send({
+      from:    `Sistema Reservas <${fromAddr}>`,
+      to:      [toAdmin],
+      subject: `🔔 Nueva reserva: ${nombre} — ${fecha} ${hora}`,
       html:    htmlAdmin({ nombre, email, telefono, servicio, fecha, hora, comentarios })
     });
-    console.log('✅ Notificacion enviada');
+    console.log('✅ Notificación admin:', r2.data?.id || JSON.stringify(r2));
 
-    res.json({ success:true, message:`Reserva confirmada, ${nombre}! Te enviamos un correo a ${email}.` });
+    res.json({ success:true, message:`¡Reserva confirmada, ${nombre}! Te enviamos un correo de confirmación a ${email}.` });
 
   } catch (err) {
-    console.error('❌ ERROR SMPT - Codigo:', err.code);
-    console.error('❌ ERROR SMTP - Mensaje:', err.message);
-    console.error('❌ ERROR SMTP - Respuesta:', err.response);
-
-    let userMsg = 'Error desconocido: ' + (err.message || '');
-    if (err.code === 'EAUTH')      userMsg = 'Contraseña de Gmail incorrecta. Verifica SMTP_PASS en Render (16 caracteres sin espacios, contraseña de aplicacion).';
-    if (err.code === 'ECONNECTION') userMsg = 'No se pudo conectar a Gmail. Verifica SMTP_HOST y SMTP_PORT.';
-    if (err.code === 'ETIMEDOUT')   userMsg = 'Timeout conectando a Gmail.';
-
-    const debugInfo = `Codigo: ${err.code || 'N/A'} | ${err.message || ''} | ${err.response || ''}`;
-    console.error('❌ DEBUG:', debugInfo);
-
-    res.status(500).json({ success:false, message: userMsg, debug: debugInfo });
+    console.error('❌ Error Resend:', err);
+    res.status(500).json({
+      success: false,
+      message: 'Error al enviar el correo: ' + (err.message || 'Error desconocido'),
+      debug: JSON.stringify(err)
+    });
   }
 });
 
-app.get('/health', (_req, res) => res.json({ ok:true, smtp: !!process.env.SMTP_USER }));
+app.get('/health', (_req, res) => res.json({ ok:true, resend: !!process.env.RESEND_API_KEY }));
 
 app.listen(PORT, () => {
   console.log('\n  ┌──────────────────────────────────┐');
   console.log('  │      BARBER & CO.  — Online      │');
   console.log('  └──────────────────────────────────┘');
   console.log(`  🚀  http://localhost:${PORT}`);
-  console.log(`  📧  SMTP: ${process.env.SMTP_USER ? '✅ ' + process.env.SMTP_USER : '⚠️  no configurado (modo demo)'}`);
+  console.log(`  📧  Resend: ${process.env.RESEND_API_KEY ? '✅ configurado' : '⚠️  no configurado (modo demo)'}`);
   console.log();
 });
