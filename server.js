@@ -420,7 +420,7 @@ const form = document.getElementById('form');
 const btn  = document.getElementById('btn');
 const msg  = document.getElementById('msg');
 
-function showMsg(text, type){ msg.textContent = text; msg.className = type; }
+function showMsg(text, type){ msg.innerHTML = text; msg.className = type; }
 
 form.addEventListener('submit', async e => {
   e.preventDefault();
@@ -450,10 +450,16 @@ form.addEventListener('submit', async e => {
       body: JSON.stringify(data)
     });
     const d = await r.json();
-    if(d.success){ showMsg('✓ ' + d.message,'ok'); form.reset(); }
-    else showMsg(d.message||'Error al procesar la reserva.','err');
-  } catch(_){
-    showMsg('Error de conexión. Por favor intenta nuevamente.','err');
+    if(d.success){
+      showMsg('✓ ' + d.message,'ok');
+      form.reset();
+    } else {
+      let errText = d.message || 'Error al procesar la reserva.';
+      if(d.debug) errText += '<br><small style="opacity:.7;font-size:10px;letter-spacing:0">' + d.debug + '</small>';
+      showMsg(errText,'err');
+    }
+  } catch(fetchErr){
+    showMsg('Error de conexión: ' + fetchErr.message,'err');
   } finally {
     btn.disabled = false;
     btn.querySelector('span').textContent = 'Confirmar Reserva';
@@ -585,6 +591,14 @@ app.post('/api/reservar', async (req, res) => {
     return res.json({ success:true, message:`¡Reserva registrada, ${nombre}! (Modo demo — configura SMTP para recibir correos reales)` });
   }
 
+
+  console.log('🔧 SMTP config:', {
+    host: process.env.SMTP_HOST || 'smtp.gmail.com',
+    port: process.env.SMTP_PORT || 587,
+    user: process.env.SMTP_USER,
+    passChars: process.env.SMTP_PASS ? process.env.SMTP_PASS.length : 0
+  });
+
   try {
     const transport = nodemailer.createTransport({
       host: process.env.SMTP_HOST || 'smtp.gmail.com',
@@ -594,31 +608,44 @@ app.post('/api/reservar', async (req, res) => {
       tls:  { rejectUnauthorized: false }
     });
 
-    // Correo al cliente
+    console.log('🔌 Verificando conexion SMTP...');
+    await transport.verify();
+    console.log('✅ Conexion SMTP OK');
+
+    console.log('📧 Enviando correo al cliente:', email);
     await transport.sendMail({
       from:    `"Barber & Co." <${process.env.SMTP_USER}>`,
       to:      email,
-      subject: `✅ Reserva confirmada — ${fecha} a las ${hora}`,
+      subject: `Reserva confirmada — ${fecha} a las ${hora}`,
       html:    htmlCliente({ nombre, telefono, servicio, fecha, hora, comentarios })
     });
+    console.log('✅ Correo al cliente enviado');
 
-    // Notificación al barbero (mismo correo del SMTP)
+    console.log('📧 Enviando notificacion a:', process.env.SMTP_USER);
     await transport.sendMail({
       from:    `"Sistema de Reservas" <${process.env.SMTP_USER}>`,
       to:      process.env.SMTP_USER,
-      subject: `🔔 Nueva reserva: ${nombre} — ${fecha} ${hora}`,
+      subject: `Nueva reserva: ${nombre} — ${fecha} ${hora}`,
       html:    htmlAdmin({ nombre, email, telefono, servicio, fecha, hora, comentarios })
     });
+    console.log('✅ Notificacion enviada');
 
-    console.log(`✅ Correos enviados a ${email} y ${process.env.SMTP_USER}`);
-    res.json({ success:true, message:`¡Reserva confirmada, ${nombre}! Te enviamos un correo de confirmación a ${email}.` });
+    res.json({ success:true, message:`Reserva confirmada, ${nombre}! Te enviamos un correo a ${email}.` });
 
   } catch (err) {
-    console.error('❌ Error SMTP completo:', JSON.stringify(err, Object.getOwnPropertyNames(err)));
-    let msg = 'Error al enviar el correo de confirmación.';
-    if (err.code === 'EAUTH')       msg = 'Error de autenticación: revisa tu usuario y contraseña de aplicación Gmail.';
-    if (err.code === 'ECONNECTION') msg = 'No se pudo conectar al servidor de correo.';
-    res.status(500).json({ success:false, message: msg + ' Contáctanos directamente al +56 9 1234 5678.' });
+    console.error('❌ ERROR SMPT - Codigo:', err.code);
+    console.error('❌ ERROR SMTP - Mensaje:', err.message);
+    console.error('❌ ERROR SMTP - Respuesta:', err.response);
+
+    let userMsg = 'Error desconocido: ' + (err.message || '');
+    if (err.code === 'EAUTH')      userMsg = 'Contraseña de Gmail incorrecta. Verifica SMTP_PASS en Render (16 caracteres sin espacios, contraseña de aplicacion).';
+    if (err.code === 'ECONNECTION') userMsg = 'No se pudo conectar a Gmail. Verifica SMTP_HOST y SMTP_PORT.';
+    if (err.code === 'ETIMEDOUT')   userMsg = 'Timeout conectando a Gmail.';
+
+    const debugInfo = `Codigo: ${err.code || 'N/A'} | ${err.message || ''} | ${err.response || ''}`;
+    console.error('❌ DEBUG:', debugInfo);
+
+    res.status(500).json({ success:false, message: userMsg, debug: debugInfo });
   }
 });
 
