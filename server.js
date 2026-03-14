@@ -1,7 +1,8 @@
 require('dotenv').config();
 
-const express = require('express');
-const cors    = require('cors');
+const express    = require('express');
+const nodemailer = require('nodemailer');
+const cors       = require('cors');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -15,12 +16,12 @@ app.use(express.urlencoded({ extended: true }));
    Edita estos arrays para cambiar días y horas disponibles
 ═══════════════════════════════════════════════════════ */
 const HORAS_DISPONIBLES = ['10:00','11:00','12:00','13:00','16:00','17:00','18:00'];
-const DIAS_ADELANTE     = 14;   // cuántos días mostrar desde hoy
-const DIAS_BLOQUEADOS   = [0];  // 0=domingo, 6=sábado ([] = ninguno bloqueado)
+const DIAS_ADELANTE     = 14;  // cuántos días mostrar desde hoy
+const DIAS_BLOQUEADOS   = [0]; // 0=domingo, 6=sábado
 
 /* ═══════════════════════════════════════════════════════
    RESERVAS EN MEMORIA
-   key: "YYYY-MM-DD|HH:MM"  →  datos del cliente
+   key: "YYYY-MM-DD|HH:MM"
 ═══════════════════════════════════════════════════════ */
 const reservas = new Map();
 
@@ -44,12 +45,11 @@ function getFechasDisponibles() {
   const fechas = [];
   const hoy    = new Date();
   hoy.setHours(0, 0, 0, 0);
-
   for (let i = 1; i <= DIAS_ADELANTE; i++) {
     const d = new Date(hoy);
     d.setDate(hoy.getDate() + i);
     if (!DIAS_BLOQUEADOS.includes(d.getDay())) {
-      fechas.push(d.toISOString().split('T')[0]); // YYYY-MM-DD
+      fechas.push(d.toISOString().split('T')[0]);
     }
   }
   return fechas;
@@ -68,15 +68,30 @@ function formatFecha(iso) {
 
 function formatDiaSemana(iso) {
   const dias = ['Domingo','Lunes','Martes','Miércoles','Jueves','Viernes','Sábado'];
-  const d = new Date(iso + 'T12:00:00');
-  return dias[d.getDay()];
+  return dias[new Date(iso + 'T12:00:00').getDay()];
+}
+
+/* ═══════════════════════════════════════════════════════
+   NODEMAILER — transporter
+═══════════════════════════════════════════════════════ */
+function crearTransporter() {
+  return nodemailer.createTransport({
+    host: process.env.SMTP_HOST || 'smtp.gmail.com',
+    port: parseInt(process.env.SMTP_PORT) || 587,
+    secure: false,
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS,
+    },
+    tls: { rejectUnauthorized: false }
+  });
 }
 
 /* ═══════════════════════════════════════════════════════
    CORREO HTML — cliente
 ═══════════════════════════════════════════════════════ */
 function htmlCliente({ nombre, telefono, servicio, fecha, hora, comentarios }) {
-  const svc     = SERVICIOS[servicio] || servicio;
+  const svc      = SERVICIOS[servicio] || servicio;
   const fechaFmt = formatFecha(fecha);
   return `<!DOCTYPE html><html><head><meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1"></head>
@@ -92,7 +107,7 @@ function htmlCliente({ nombre, telefono, servicio, fecha, hora, comentarios }) {
     <tr><td style="background:#141420;padding:36px 32px">
       <p style="margin:0 0 6px;color:#c9a84c;font-size:10px;letter-spacing:5px;text-transform:uppercase;font-family:Arial,sans-serif">Reserva Confirmada ✅</p>
       <p style="margin:0 0 14px;color:#d4c9b0;font-size:16px;line-height:1.8">Estimado/a <strong style="color:#f5f0e8">${nombre}</strong>,</p>
-      <p style="margin:0 0 28px;color:#888;font-size:13px;line-height:1.85">Tu reserva ha sido confirmada exitosamente. Te esperamos con todo nuestro equipo.</p>
+      <p style="margin:0 0 28px;color:#888;font-size:13px;line-height:1.85">Tu reserva ha sido confirmada exitosamente. Te esperamos con todo nuestro equipo listo para brindarte la mejor experiencia.</p>
       <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #252530;border-top:2px solid #c9a84c">
         <tr><td style="padding:18px 22px;border-bottom:1px solid #252530">
           <p style="margin:0;color:#555;font-size:9px;letter-spacing:3px;text-transform:uppercase;font-family:Arial,sans-serif">Servicio</p>
@@ -133,7 +148,7 @@ function htmlCliente({ nombre, telefono, servicio, fecha, hora, comentarios }) {
 }
 
 /* ═══════════════════════════════════════════════════════
-   CORREO HTML — admin
+   CORREO HTML — admin (notificación al barbero)
 ═══════════════════════════════════════════════════════ */
 function htmlAdmin({ nombre, email, telefono, servicio, fecha, hora, comentarios }) {
   const svc      = SERVICIOS[servicio] || servicio;
@@ -155,54 +170,32 @@ function htmlAdmin({ nombre, email, telefono, servicio, fecha, hora, comentarios
 }
 
 /* ═══════════════════════════════════════════════════════
-   ENVÍO CON RESEND
+   ENVÍO DE CORREOS
 ═══════════════════════════════════════════════════════ */
 async function enviarCorreos({ nombre, email, telefono, servicio, fecha, hora, comentarios }) {
-  const key = process.env.RESEND_API_KEY;
-  if (!key) {
-    console.log('⚠️  RESEND_API_KEY no configurada — modo demo, correo simulado');
-    return;
-  }
+  const transporter = crearTransporter();
 
-  const from   = process.env.FROM_EMAIL || 'Barber & Co. <onboarding@resend.dev>';
-  const admin  = process.env.ADMIN_EMAIL || email; // si no hay ADMIN_EMAIL, notifica al mismo cliente
-  const fechaFmt = formatFecha(fecha);
+  console.log('🔌 Verificando conexión SMTP...');
+  await transporter.verify();
+  console.log('✅ Conexión SMTP OK');
 
   // Correo al cliente
-  const r1 = await fetch('https://api.resend.com/emails', {
-    method:  'POST',
-    headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      from,
-      to:      [email],
-      subject: `✅ Reserva confirmada — ${fechaFmt} a las ${hora} | Barber & Co.`,
-      html:    htmlCliente({ nombre, telefono, servicio, fecha, hora, comentarios }),
-    }),
+  await transporter.sendMail({
+    from:    `"Barber & Co." <${process.env.SMTP_USER}>`,
+    to:      email,
+    subject: `✅ Reserva confirmada — ${formatFecha(fecha)} a las ${hora} | Barber & Co.`,
+    html:    htmlCliente({ nombre, telefono, servicio, fecha, hora, comentarios }),
   });
+  console.log(`📧 Correo enviado al cliente: ${email}`);
 
-  if (!r1.ok) {
-    const err = await r1.json().catch(() => ({}));
-    throw new Error(`Resend cliente: ${r1.status} — ${JSON.stringify(err)}`);
-  }
-
-  // Notificación al admin
-  const r2 = await fetch('https://api.resend.com/emails', {
-    method:  'POST',
-    headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      from,
-      to:      [admin],
-      subject: `🔔 Nueva reserva: ${nombre} — ${fechaFmt} ${hora}`,
-      html:    htmlAdmin({ nombre, email, telefono, servicio, fecha, hora, comentarios }),
-    }),
+  // Notificación al barbero (llega al mismo Gmail configurado)
+  await transporter.sendMail({
+    from:    `"Sistema Reservas" <${process.env.SMTP_USER}>`,
+    to:      process.env.SMTP_USER,
+    subject: `🔔 Nueva reserva: ${nombre} — ${formatFecha(fecha)} ${hora}`,
+    html:    htmlAdmin({ nombre, email, telefono, servicio, fecha, hora, comentarios }),
   });
-
-  if (!r2.ok) {
-    const err = await r2.json().catch(() => ({}));
-    throw new Error(`Resend admin: ${r2.status} — ${JSON.stringify(err)}`);
-  }
-
-  console.log(`📧 Correos enviados → cliente: ${email} | admin: ${admin}`);
+  console.log(`📧 Notificación enviada al barbero: ${process.env.SMTP_USER}`);
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -322,7 +315,7 @@ nav.solid{background:rgba(5,5,10,.95);backdrop-filter:blur(18px);border-bottom:1
 .fg textarea{resize:vertical;min-height:82px}
 .fg input:focus,.fg select:focus,.fg textarea:focus{border-bottom-color:var(--g);background:var(--b4)}
 .fg input::placeholder,.fg textarea::placeholder{color:var(--f)}
-.slots-loading{font-size:11px;color:var(--m);letter-spacing:2px;padding:8px 0;display:none}
+.slots-loading{font-size:11px;color:var(--m);letter-spacing:2px;padding:6px 0;display:none}
 .btn-send{width:100%;padding:17px;background:transparent;border:1px solid var(--g);color:var(--g);font-family:var(--sans);font-size:11px;font-weight:300;letter-spacing:5px;text-transform:uppercase;cursor:pointer;transition:all .4s var(--ease);position:relative;overflow:hidden}
 .btn-send::before{content:'';position:absolute;inset:0;background:var(--g);transform:translateX(-100%);transition:transform .4s var(--ease);z-index:0}
 .btn-send span{position:relative;z-index:1;transition:color .4s}
@@ -393,10 +386,7 @@ footer{background:var(--b2);border-top:1px solid var(--bs);padding:56px 0 28px}
 
 <div id="stats">
   <div class="stats-row">
-    <div class="stat rev">
-      <span class="stat-n">+2000</span>
-      <span class="stat-l">Clientes Satisfechos</span>
-    </div>
+    <div class="stat rev"><span class="stat-n">+2000</span><span class="stat-l">Clientes Satisfechos</span></div>
     <div class="stat rev"><span class="stat-n" data-n="6">0</span><span class="stat-l">Años de Experiencia</span></div>
     <div class="stat rev"><span class="stat-n" data-n="3">0</span><span class="stat-l">Maestros Barberos</span></div>
     <div class="stat rev"><span class="stat-n" data-n="7">0</span><span class="stat-l">Servicios Premium</span></div>
@@ -479,7 +469,7 @@ footer{background:var(--b2);border-top:1px solid var(--bs);padding:56px 0 28px}
             <div class="fg">
               <label for="fecha">Fecha *</label>
               <select id="fecha" name="fecha" required>
-                <option value="" disabled selected>Selecciona fecha…</option>
+                <option value="" disabled selected>Cargando fechas…</option>
               </select>
             </div>
             <div class="fg">
@@ -537,11 +527,11 @@ footer{background:var(--b2);border-top:1px solid var(--bs);padding:56px 0 28px}
 </footer>
 
 <script>
-// ── nav ──
+// nav
 const nav = document.getElementById('nav');
 window.addEventListener('scroll', () => nav.classList.toggle('solid', scrollY > 55), {passive:true});
 
-// ── smooth scroll ──
+// smooth scroll
 document.querySelectorAll('a[href^="#"]').forEach(a =>
   a.addEventListener('click', e => {
     const t = document.querySelector(a.getAttribute('href'));
@@ -549,7 +539,7 @@ document.querySelectorAll('a[href^="#"]').forEach(a =>
   })
 );
 
-// ── reveal ──
+// reveal
 const ro = new IntersectionObserver((entries) => {
   entries.forEach((e,i) => {
     if(e.isIntersecting){ setTimeout(()=>e.target.classList.add('in'), i*75); ro.unobserve(e.target); }
@@ -557,11 +547,11 @@ const ro = new IntersectionObserver((entries) => {
 },{threshold:.1});
 document.querySelectorAll('.rev').forEach(el => ro.observe(el));
 
-// ── counters (solo los que tienen data-n) ──
+// counters (solo data-n)
 const co = new IntersectionObserver(entries => {
   entries.forEach(e => {
     if(!e.isIntersecting) return;
-    const el = e.target, target = +el.dataset.n, dur = 1800, step = target/(dur/16);
+    const el = e.target, target = +el.dataset.n, step = target/(1800/16);
     let cur = 0;
     const t = setInterval(()=>{
       cur += step;
@@ -573,57 +563,49 @@ const co = new IntersectionObserver(entries => {
 },{threshold:.6});
 document.querySelectorAll('[data-n]').forEach(el => co.observe(el));
 
-// ── fechas y horarios dinámicos ──
-const selFecha = document.getElementById('fecha');
-const selHora  = document.getElementById('hora');
-const loadingEl = document.getElementById('slots-loading');
+// fechas y horarios
+const selFecha    = document.getElementById('fecha');
+const selHora     = document.getElementById('hora');
+const loadingEl   = document.getElementById('slots-loading');
 
-// Cargar fechas disponibles al iniciar
 async function cargarFechas() {
   try {
     const r = await fetch('/api/horarios');
     const d = await r.json();
-    selFecha.innerHTML = '<option value="" disabled selected>Selecciona fecha…</option>';
+    selFecha.innerHTML = '<option value="" disabled selected>Selecciona una fecha…</option>';
     d.fechas.forEach(f => {
-      const opt = document.createElement('option');
-      opt.value = f.iso;
-      opt.textContent = f.label;
-      selFecha.appendChild(opt);
+      const o = document.createElement('option');
+      o.value = f.iso;
+      o.textContent = f.label;
+      selFecha.appendChild(o);
     });
-  } catch(err) {
-    console.error('Error cargando fechas:', err);
+  } catch(e) {
+    selFecha.innerHTML = '<option value="" disabled selected>Error cargando fechas</option>';
   }
 }
 
-// Cuando el usuario elige fecha, cargar horas disponibles
 selFecha.addEventListener('change', async () => {
   const fecha = selFecha.value;
-  if(!fecha) return;
-
   selHora.disabled = true;
   selHora.innerHTML = '<option value="" disabled selected>Cargando…</option>';
   loadingEl.style.display = 'block';
-
   try {
     const r = await fetch('/api/horarios');
     const d = await r.json();
-    const fechaData = d.fechas.find(f => f.iso === fecha);
-    const horas = fechaData ? fechaData.horas : [];
-
-    selHora.innerHTML = '';
+    const fd = d.fechas.find(f => f.iso === fecha);
+    const horas = fd ? fd.horas : [];
     if(horas.length === 0){
       selHora.innerHTML = '<option value="" disabled selected>Sin horarios disponibles</option>';
     } else {
       selHora.innerHTML = '<option value="" disabled selected>Elige una hora…</option>';
       horas.forEach(h => {
-        const opt = document.createElement('option');
-        opt.value = h;
-        opt.textContent = h;
-        selHora.appendChild(opt);
+        const o = document.createElement('option');
+        o.value = h; o.textContent = h;
+        selHora.appendChild(o);
       });
       selHora.disabled = false;
     }
-  } catch(err) {
+  } catch(e) {
     selHora.innerHTML = '<option value="" disabled selected>Error cargando horas</option>';
   } finally {
     loadingEl.style.display = 'none';
@@ -632,7 +614,7 @@ selFecha.addEventListener('change', async () => {
 
 cargarFechas();
 
-// ── form ──
+// form
 const form = document.getElementById('form');
 const btn  = document.getElementById('btn');
 const msg  = document.getElementById('msg');
@@ -650,15 +632,12 @@ form.addEventListener('submit', async e => {
     hora:        form.hora.value,
     comentarios: form.comentarios.value.trim()
   };
-
   if(!data.nombre||!data.email||!data.telefono||!data.servicio||!data.fecha||!data.hora){
     showMsg('Por favor completa todos los campos obligatorios.','err'); return;
   }
-
   btn.disabled = true;
   btn.querySelector('span').textContent = 'Enviando…';
   msg.className = '';
-
   try {
     const r = await fetch('/api/reservar',{
       method:'POST',
@@ -671,7 +650,6 @@ form.addEventListener('submit', async e => {
       form.reset();
       selHora.disabled = true;
       selHora.innerHTML = '<option value="" disabled selected>Primero elige fecha…</option>';
-      // Recargar fechas para reflejar el horario ocupado
       await cargarFechas();
     } else {
       showMsg(d.message||'Error al procesar la reserva.','err');
@@ -688,13 +666,12 @@ form.addEventListener('submit', async e => {
 </html>`;
 
 /* ═══════════════════════════════════════════════════════
-   RUTAS API
+   RUTAS
 ═══════════════════════════════════════════════════════ */
+app.get('/', (_req, res) => res.send(PAGE));
 
-// GET /api/horarios — devuelve fechas con sus horas libres
 app.get('/api/horarios', (_req, res) => {
-  const fechasISO = getFechasDisponibles();
-  const fechas = fechasISO.map(iso => ({
+  const fechas = getFechasDisponibles().map(iso => ({
     iso,
     label: `${formatDiaSemana(iso)} ${formatFecha(iso)}`,
     horas: getHorasLibres(iso),
@@ -702,81 +679,74 @@ app.get('/api/horarios', (_req, res) => {
   res.json({ fechas });
 });
 
-// POST /api/reservar
 app.post('/api/reservar', async (req, res) => {
   const { nombre, email, telefono, servicio, fecha, hora, comentarios } = req.body;
 
-  // Validación de campos
-  if (!nombre || !email || !telefono || !servicio || !fecha || !hora) {
-    return res.status(400).json({ success: false, message: 'Por favor completa todos los campos obligatorios.' });
-  }
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return res.status(400).json({ success: false, message: 'El formato del correo no es válido.' });
-  }
-  if (!SERVICIOS[servicio]) {
-    return res.status(400).json({ success: false, message: 'Servicio no válido.' });
-  }
+  // Validación
+  if (!nombre || !email || !telefono || !servicio || !fecha || !hora)
+    return res.status(400).json({ success:false, message:'Por favor completa todos los campos obligatorios.' });
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+    return res.status(400).json({ success:false, message:'El formato del correo no es válido.' });
+  if (!SERVICIOS[servicio])
+    return res.status(400).json({ success:false, message:'Servicio no válido.' });
+  if (!getFechasDisponibles().includes(fecha))
+    return res.status(400).json({ success:false, message:'La fecha seleccionada no está disponible.' });
+  if (!HORAS_DISPONIBLES.includes(hora))
+    return res.status(400).json({ success:false, message:'La hora seleccionada no es válida.' });
 
-  // Validar que la fecha esté en el rango disponible
-  const fechasValidas = getFechasDisponibles();
-  if (!fechasValidas.includes(fecha)) {
-    return res.status(400).json({ success: false, message: 'La fecha seleccionada no está disponible.' });
-  }
-
-  // Validar que la hora esté en los horarios disponibles
-  if (!HORAS_DISPONIBLES.includes(hora)) {
-    return res.status(400).json({ success: false, message: 'La hora seleccionada no es válida.' });
-  }
-
-  // Verificar si el horario ya está reservado
+  // Verificar si ya está reservado
   const key = `${fecha}|${hora}`;
-  if (reservas.has(key)) {
-    return res.status(409).json({ success: false, message: 'Este horario ya está reservado. Por favor elige otro.' });
-  }
+  if (reservas.has(key))
+    return res.status(409).json({ success:false, message:'Este horario ya está reservado. Por favor elige otro.' });
 
-  // Guardar la reserva en memoria
+  // Guardar reserva
   reservas.set(key, { nombre, email, telefono, servicio, fecha, hora, comentarios, creadoEn: new Date().toISOString() });
-  console.log(`✅ Reserva registrada: ${nombre} | ${fecha} ${hora} | ${servicio}`);
-  console.log(`📋 Total reservas activas: ${reservas.size}`);
+  console.log(`✅ Reserva: ${nombre} | ${fecha} ${hora} | ${servicio} | Total: ${reservas.size}`);
 
-  // Enviar correos con Resend
-  try {
-    await enviarCorreos({ nombre, email, telefono, servicio, fecha, hora, comentarios });
-  } catch (err) {
-    console.error('❌ Error al enviar correos:', err.message);
-    // La reserva ya fue guardada, solo falló el correo
+  // Modo demo si no hay SMTP configurado
+  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+    console.log('⚠️  SMTP no configurado — modo demo, correo simulado');
     return res.json({
       success: true,
-      message: `¡Reserva confirmada, ${nombre}! Tu cita para el ${formatFecha(fecha)} a las ${hora} está registrada. (El correo de confirmación no pudo enviarse, contáctanos si lo necesitas.)`
+      message: `¡Reserva confirmada, ${nombre}! Tu cita es el ${formatFecha(fecha)} a las ${hora}. (Modo demo: configura SMTP_USER y SMTP_PASS en las variables de entorno para enviar correos reales)`
     });
   }
 
-  res.json({
-    success: true,
-    message: `¡Reserva confirmada, ${nombre}! Te enviamos un correo de confirmación a ${email}. Tu cita es el ${formatFecha(fecha)} a las ${hora}.`
-  });
+  // Enviar correos
+  try {
+    await enviarCorreos({ nombre, email, telefono, servicio, fecha, hora, comentarios });
+    res.json({
+      success: true,
+      message: `¡Reserva confirmada, ${nombre}! Te enviamos un correo a ${email}. Tu cita es el ${formatFecha(fecha)} a las ${hora}.`
+    });
+  } catch (err) {
+    console.error('❌ Error SMTP:', err.code, '-', err.message);
+    // La reserva ya fue guardada aunque falle el correo
+    let detalle = '';
+    if (err.code === 'EAUTH') detalle = ' (Error de autenticación Gmail — revisa tu contraseña de aplicación)';
+    if (err.code === 'ECONNECTION') detalle = ' (No se pudo conectar al servidor de correo)';
+    res.json({
+      success: true,
+      message: `¡Reserva registrada, ${nombre}! Tu cita es el ${formatFecha(fecha)} a las ${hora}. No pudimos enviarte el correo de confirmación${detalle}, pero tu reserva está guardada.`
+    });
+  }
 });
 
-// GET /health
-app.get('/health', (_req, res) => {
-  res.json({
-    ok:      true,
-    resend:  !!process.env.RESEND_API_KEY,
-    reservas: reservas.size,
-  });
-});
+app.get('/health', (_req, res) => res.json({
+  ok: true,
+  smtp: !!process.env.SMTP_USER,
+  reservas: reservas.size
+}));
 
 /* ═══════════════════════════════════════════════════════
    INICIO
 ═══════════════════════════════════════════════════════ */
-app.get('/', (_req, res) => res.send(PAGE));
-
 app.listen(PORT, () => {
   console.log('\n  ┌──────────────────────────────────────┐');
   console.log('  │        BARBER & CO.  — Online        │');
   console.log('  └──────────────────────────────────────┘');
   console.log(`  🚀  http://localhost:${PORT}`);
-  console.log(`  📧  Resend: ${process.env.RESEND_API_KEY ? '✅ configurado' : '⚠️  no configurado (modo demo)'}`);
-  console.log(`  📅  Mostrando ${DIAS_ADELANTE} días · ${HORAS_DISPONIBLES.length} horarios/día`);
+  console.log(`  📧  Gmail SMTP: ${process.env.SMTP_USER ? '✅ ' + process.env.SMTP_USER : '⚠️  no configurado (modo demo)'}`);
+  console.log(`  📅  ${DIAS_ADELANTE} días disponibles · ${HORAS_DISPONIBLES.length} horarios/día`);
   console.log();
 });
