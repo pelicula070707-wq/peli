@@ -614,7 +614,7 @@ app.post('/api/reservar', async (req, res) => {
     res.json({ success:true, message:`¡Reserva confirmada, ${nombre}! Te enviamos un correo de confirmación a ${email}.` });
 
   } catch (err) {
-    console.error('❌ Error SMTP:', err.code, err.message);
+    console.error('❌ Error SMTP completo:', JSON.stringify(err, Object.getOwnPropertyNames(err)));
     let msg = 'Error al enviar el correo de confirmación.';
     if (err.code === 'EAUTH')       msg = 'Error de autenticación: revisa tu usuario y contraseña de aplicación Gmail.';
     if (err.code === 'ECONNECTION') msg = 'No se pudo conectar al servidor de correo.';
